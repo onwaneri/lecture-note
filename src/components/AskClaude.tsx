@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from 'react'
+import { marked } from 'marked'
 import { askClaude, hasApiKey, type ChatTurn } from '../lib/askClaude'
 import { getPageText, type PDFDocumentProxy } from '../lib/pdf'
+
+marked.setOptions({ breaks: true, gfm: true })
+
+function renderMarkdown(md: string): string {
+  return marked.parse(md, { async: false }) as string
+}
 
 interface AskClaudeProps {
   doc: PDFDocumentProxy | null
@@ -17,6 +24,11 @@ interface Turn extends ChatTurn {
   pending?: boolean
 }
 
+interface Size {
+  width?: number
+  height?: number
+}
+
 export function AskClaude({
   doc,
   slideIndex,
@@ -31,9 +43,11 @@ export function AskClaude({
   const [turns, setTurns] = useState<Turn[]>([])
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [size, setSize] = useState<Size>({})
 
   const abortRef = useRef<AbortController | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
+  const panelRef = useRef<HTMLElement | null>(null)
 
   // Fresh conversation when the slide changes — context shifts per slide.
   useEffect(() => {
@@ -51,6 +65,37 @@ export function AskClaude({
     const el = logRef.current
     if (el) el.scrollTop = el.scrollHeight
   }, [turns])
+
+  // Drag-to-resize. Both windows grow away from their anchor: the floating
+  // window is pinned bottom-right so its top-left handle grows up/left; the
+  // inline window sits at the bottom of the notes panel so its top edge grows
+  // upward.
+  function startResize(e: React.PointerEvent) {
+    e.preventDefault()
+    const el = panelRef.current
+    if (!el) return
+    const startX = e.clientX
+    const startY = e.clientY
+    const startW = el.offsetWidth
+    const startH = el.offsetHeight
+
+    function onMove(ev: PointerEvent) {
+      if (variant === 'floating') {
+        const nextW = clamp(startW + (startX - ev.clientX), 280, window.innerWidth - 44)
+        const nextH = clamp(startH + (startY - ev.clientY), 220, window.innerHeight - 44)
+        setSize({ width: nextW, height: nextH })
+      } else {
+        const nextH = clamp(startH + (startY - ev.clientY), 120, window.innerHeight * 0.8)
+        setSize({ height: nextH })
+      }
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   async function submit() {
     const question = input.trim()
@@ -124,8 +169,27 @@ export function AskClaude({
 
   const showHeaderToggle = variant === 'floating'
 
+  // Apply resized dimensions. The inline window only controls its height; the
+  // floating window controls both (and only while open).
+  const style: React.CSSProperties =
+    variant === 'inline'
+      ? { height: size.height }
+      : { width: size.width, height: open ? size.height : undefined }
+
   return (
-    <section className={`ask-claude ask-claude-${variant} ${open ? 'open' : 'closed'}`}>
+    <section
+      ref={panelRef}
+      className={`ask-claude ask-claude-${variant} ${open ? 'open' : 'closed'}`}
+      style={style}
+    >
+      {open ? (
+        <div
+          className={`ask-resize ask-resize-${variant === 'floating' ? 'corner' : 'top'}`}
+          onPointerDown={startResize}
+          title="Drag to resize"
+        />
+      ) : null}
+
       <header
         className="ask-head"
         onClick={showHeaderToggle ? () => setOpen((o) => !o) : undefined}
@@ -159,7 +223,18 @@ export function AskClaude({
                         {t.role === 'user' ? 'You' : 'Claude'}
                       </div>
                       <div className="ask-turn-content">
-                        {t.content || (t.pending ? <span className="ask-cursor">▍</span> : '')}
+                        {t.role === 'assistant' ? (
+                          t.content ? (
+                            <div
+                              className="ask-md"
+                              dangerouslySetInnerHTML={{ __html: renderMarkdown(t.content) }}
+                            />
+                          ) : t.pending ? (
+                            <span className="ask-cursor">▍</span>
+                          ) : null
+                        ) : (
+                          t.content
+                        )}
                       </div>
                     </div>
                   ))}
@@ -197,4 +272,8 @@ export function AskClaude({
       ) : null}
     </section>
   )
+}
+
+function clamp(value: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, value))
 }

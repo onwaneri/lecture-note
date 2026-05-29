@@ -1,4 +1,12 @@
-import { useCallback, useEffect, useRef, useState, type DragEvent } from 'react'
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type DragEvent,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import { Header } from './components/Header'
 import { SlideViewer } from './components/SlideViewer'
 import { NotesPanel } from './components/NotesPanel'
@@ -35,6 +43,9 @@ export function App() {
   const [view, setView] = useState<View>('lecture')
   const [libraryCount, setLibraryCount] = useState(0)
   const [bootChecked, setBootChecked] = useState(false)
+  const [notesWidth, setNotesWidth] = useState<number | null>(null)
+
+  const mainRef = useRef<HTMLDivElement | null>(null)
 
   const filename = pdf?.filename ?? null
   const numPages = pdf?.numPages ?? 0
@@ -105,6 +116,26 @@ export function App() {
     }, 250)
     return () => window.clearTimeout(t)
   }, [filename, activeIndex])
+
+  // Drag the divider between the slide viewer and the notes panel. Width is
+  // measured from the right edge of the main area so the notes panel grows as
+  // you drag left.
+  function startNotesResize(e: ReactPointerEvent) {
+    e.preventDefault()
+    const main = mainRef.current
+    if (!main) return
+    const rect = main.getBoundingClientRect()
+    function onMove(ev: PointerEvent) {
+      const w = Math.max(300, Math.min(rect.right - ev.clientX, rect.width - 360))
+      setNotesWidth(w)
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   const handleOpenFile = useCallback(() => {
     fileInputRef.current?.click()
@@ -239,7 +270,15 @@ export function App() {
         }}
       />
 
-      <div className="main">
+      <div
+        className="main"
+        ref={mainRef}
+        style={
+          notesWidth != null
+            ? ({ '--notes-w': `${notesWidth}px` } as CSSProperties)
+            : undefined
+        }
+      >
         {view === 'library' ? (
           <div className="library-host">
             <LibraryView
@@ -343,6 +382,13 @@ export function App() {
               numPages={numPages}
               activeIndex={activeIndex}
               onActiveChange={setActiveIndex}
+            />
+            <div
+              className="pane-divider"
+              onPointerDown={startNotesResize}
+              role="separator"
+              aria-orientation="vertical"
+              title="Drag to resize"
             />
             <NotesPanel
               slideIndex={activeIndex}

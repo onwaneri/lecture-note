@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import {
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+} from 'react'
 import type { PDFDocumentProxy, PDFPageProxy } from '../lib/pdf'
 import { renderPageToCanvas } from '../lib/pdf'
 import { SlideThumbStrip } from './SlideThumbStrip'
@@ -39,6 +45,25 @@ export function SlideViewer({
   const [frameSize, setFrameSize] = useState<{ w: number; h: number } | null>(
     null,
   )
+  // User-resizable thumbnail height (px). Drag the divider above the strip.
+  const [thumbHeight, setThumbHeight] = useState(56)
+
+  function startThumbResize(e: ReactPointerEvent) {
+    e.preventDefault()
+    const startY = e.clientY
+    const startH = thumbHeight
+    function onMove(ev: PointerEvent) {
+      // Dragging up makes the thumbnails taller.
+      const next = Math.max(40, Math.min(startH + (startY - ev.clientY), 220))
+      setThumbHeight(next)
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }
 
   useEffect(() => {
     activeRef.current = activeIndex
@@ -221,19 +246,32 @@ export function SlideViewer({
     : { visibility: 'hidden' as const }
 
   return (
-    <div className="slide-viewer" ref={containerRef}>
+    <div
+      className="slide-viewer"
+      ref={containerRef}
+      style={{ '--thumb-h': `${thumbHeight}px` } as CSSProperties}
+    >
       <div className="slide-viewer-stage" ref={stageRef}>
         <div className="slide-frame" ref={frameRef} style={frameStyle}>
           <div className="slide-canvas-host" ref={canvasHostRef} />
         </div>
       </div>
       {numPages > 1 ? (
-        <SlideThumbStrip
-          doc={doc}
-          numPages={numPages}
-          activeIndex={activeIndex}
-          onSelect={onActiveChange}
-        />
+        <>
+          <div
+            className="thumb-divider"
+            onPointerDown={startThumbResize}
+            role="separator"
+            aria-orientation="horizontal"
+            title="Drag to resize thumbnails"
+          />
+          <SlideThumbStrip
+            doc={doc}
+            numPages={numPages}
+            activeIndex={activeIndex}
+            onSelect={onActiveChange}
+          />
+        </>
       ) : null}
     </div>
   )
