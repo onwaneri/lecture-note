@@ -1,0 +1,47 @@
+:root {
+  /* Atelier — warm white editorial palette */
+  --ate-bg: #f6f4ee;
+  --ate-bg-2: #efece2;
+  --ate-surface: #ffffff;
+  --ate-ink: #14130f;
+  --ate-ink-2: #2a2823;
+  --ate-muted: #6a6660;
+  --ate-faint: #b3ada1;
+  --ate-rule: #e2ddd0;
+  --ate-rule-2: #cfc8b6;
+  --ate-accent: #2747b3;
+  --ate-accent-2: #1a3389;
+  --ate-mark: #f7e58a;
+  --ate-mark-2: #e6cb3e;
+  --ate-red: #b3422a;
+
+  /* Aliases mapped to legacy variable names so any unported rule degrades gracefully */
+  --bg: var(--ate-bg);
+  --surface: var(--ate-surface);
+  --surface2: var(--ate-bg-2);
+  --border: var(--ate-rule);
+  --border2: var(--ate-rule-2);
+  --text: var(--ate-ink);
+  --text2: var(--ate-muted);
+  --text3: var(--ate-faint);
+  --amber: var(--ate-accent);
+  --amber-dim: var(--ate-accent-2);
+  --green: var(--ate-accent);
+  --red: var(--ate-red);
+
+  /* Typography */
+  --font-display: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-ui: 'Instrument Sans', system-ui, -apple-system, Segoe UI, sans-serif;
+  --font-notes: 'Newsreader', Georgia, 'Times New Roman', serif;
+  --font-mono: ui-monospace, 'JetBrains Mono', Menlo, Consolas, monospace;
+
+  /* Shape */
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+  --radius-pill: 999px;
+
+  /* Elevation */
+  --shadow-card: 0 1px 0 rgba(0, 0, 0, 0.02), 0 12px 32px -16px rgba(20, 19, 15, 0.18);
+  --shadow-pop: 0 12px 32px -16px rgba(20, 19, 15, 0.25);
+}
