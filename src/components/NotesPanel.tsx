@@ -3,6 +3,8 @@ import { EditorContent, useEditor } from '@tiptap/react'
 import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { Markdown } from 'tiptap-markdown'
+import { AskClaude } from './AskClaude'
+import type { PDFDocumentProxy } from '../lib/pdf'
 
 interface NotesPanelProps {
   slideIndex: number
@@ -10,6 +12,8 @@ interface NotesPanelProps {
   value: string
   onChange: (markdown: string) => void
   disabled?: boolean
+  doc?: PDFDocumentProxy | null
+  sessionName?: string
 }
 
 export function NotesPanel({
@@ -18,6 +22,8 @@ export function NotesPanel({
   value,
   onChange,
   disabled,
+  doc = null,
+  sessionName = '',
 }: NotesPanelProps) {
   const onChangeRef = useRef(onChange)
   const lastEmittedRef = useRef<string>(value)
@@ -150,6 +156,14 @@ export function NotesPanel({
       <div className="editor-area" onClick={focusEditor}>
         <EditorContent editor={editor} />
       </div>
+      <AskClaude
+        variant="inline"
+        doc={doc}
+        slideIndex={slideIndex}
+        totalSlides={totalSlides}
+        sessionName={sessionName}
+        notes={value}
+      />
     </section>
   )
 }

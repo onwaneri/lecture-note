@@ -30,6 +30,29 @@ export interface RenderedPage {
   height: number
 }
 
+/**
+ * Extract the text layer of a single page (1-based not — `index` is 0-based to
+ * match the rest of the app). Returns '' for image-only / scanned slides.
+ */
+export async function getPageText(
+  doc: PDFDocumentProxy,
+  index: number,
+): Promise<string> {
+  try {
+    const page = await doc.getPage(index + 1)
+    const content = await page.getTextContent()
+    const text = content.items
+      .map((item) => ('str' in item ? item.str : ''))
+      .join(' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+    return text
+  } catch (e) {
+    console.warn('getPageText failed', e)
+    return ''
+  }
+}
+
 export async function renderPageToCanvas(
   page: PDFPageProxy,
   scale: number,

@@ -4,6 +4,7 @@ import StarterKit from '@tiptap/starter-kit'
 import Placeholder from '@tiptap/extension-placeholder'
 import { Markdown } from 'tiptap-markdown'
 import { renderPageToCanvas, type PDFDocumentProxy } from '../lib/pdf'
+import { AskClaude } from './AskClaude'
 
 interface FocusViewProps {
   doc: PDFDocumentProxy
@@ -207,6 +208,15 @@ export function FocusView({
           <EditorContent editor={editor} />
         </div>
       </article>
+
+      <AskClaude
+        variant="floating"
+        doc={doc}
+        slideIndex={activeIndex}
+        totalSlides={numPages}
+        sessionName={sessionName}
+        notes={markdown}
+      />
     </div>
   )
 }

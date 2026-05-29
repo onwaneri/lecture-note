@@ -349,6 +349,8 @@ export function App() {
               totalSlides={numPages}
               value={getNote(activeIndex)}
               onChange={(md) => updateNote(activeIndex, md)}
+              doc={pdf.doc}
+              sessionName={sessionName}
             />
           </>
         )}

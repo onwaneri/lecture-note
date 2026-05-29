@@ -1231,3 +1231,193 @@ button:disabled {
 .file-hidden {
   display: none;
 }
+
+/* ===== Ask Claude (Q&A) ============================================== */
+
+.ask-claude {
+  font-family: var(--font-ui);
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+/* Inline variant — docked at the bottom of the notes panel. */
+.ask-claude-inline {
+  flex: 0 0 auto;
+  border-top: 1px solid var(--ate-rule);
+  background: var(--ate-bg);
+  max-height: 46%;
+}
+
+/* Floating variant — pops out to the bottom-right in focus mode. */
+.ask-claude-floating {
+  position: fixed;
+  right: 22px;
+  bottom: 22px;
+  width: 360px;
+  max-width: calc(100vw - 44px);
+  z-index: 50;
+  background: var(--ate-surface);
+  border: 1px solid var(--ate-rule-2);
+  border-radius: 12px;
+  box-shadow: 0 14px 40px rgba(20, 19, 15, 0.18);
+  overflow: hidden;
+}
+.ask-claude-floating.open {
+  max-height: min(70vh, 560px);
+}
+
+.ask-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 9px 14px;
+  gap: 10px;
+  user-select: none;
+}
+.ask-claude-floating .ask-head {
+  cursor: pointer;
+  border-bottom: 1px solid var(--ate-rule);
+  background: var(--ate-bg-2);
+}
+.ask-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ate-muted);
+}
+.ask-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--ate-accent);
+  box-shadow: 0 0 0 3px rgba(39, 71, 179, 0.14);
+}
+.ask-chevron {
+  color: var(--ate-faint);
+  font-size: 12px;
+}
+
+.ask-body {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  padding: 0 14px 12px;
+  gap: 10px;
+}
+.ask-claude-inline .ask-body {
+  flex: 1 1 auto;
+  overflow: hidden;
+}
+
+.ask-empty,
+.ask-hint {
+  font-size: 12.5px;
+  line-height: 1.5;
+  color: var(--ate-muted);
+  padding: 6px 0;
+}
+.ask-empty code {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: var(--ate-bg-2);
+  border: 1px solid var(--ate-rule);
+  border-radius: 4px;
+  padding: 1px 4px;
+  color: var(--ate-ink-2);
+}
+
+.ask-log {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 4px 2px;
+  max-height: 320px;
+}
+.ask-claude-inline .ask-log {
+  max-height: none;
+}
+
+.ask-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ask-turn-role {
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ate-faint);
+}
+.ask-turn-content {
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--ate-ink-2);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.ask-turn-user .ask-turn-content {
+  color: var(--ate-ink);
+  font-weight: 500;
+}
+.ask-cursor {
+  color: var(--ate-accent);
+  animation: ask-blink 1s steps(2, start) infinite;
+}
+@keyframes ask-blink {
+  to {
+    opacity: 0;
+  }
+}
+
+.ask-error {
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--ate-red);
+  background: rgba(179, 66, 42, 0.08);
+  border: 1px solid rgba(179, 66, 42, 0.25);
+  border-radius: 6px;
+  padding: 6px 9px;
+}
+
+.ask-input-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+}
+.ask-input {
+  flex: 1 1 auto;
+  resize: none;
+  max-height: 96px;
+  font-family: var(--font-ui);
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ate-ink);
+  background: var(--ate-surface);
+  border: 1px solid var(--ate-rule);
+  border-radius: 8px;
+  padding: 8px 10px;
+  outline: none;
+  transition: border-color 0.12s ease;
+}
+.ask-input:focus {
+  border-color: var(--ate-accent);
+}
+.ask-input:disabled {
+  opacity: 0.6;
+}
+.ask-send {
+  flex: 0 0 auto;
+  height: 36px;
+}
+.ask-send:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
