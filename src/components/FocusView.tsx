@@ -5,6 +5,7 @@ import Placeholder from '@tiptap/extension-placeholder'
 import { Markdown } from 'tiptap-markdown'
 import { renderPageToCanvas, type PDFDocumentProxy } from '../lib/pdf'
 import { AskClaude } from './AskClaude'
+import type { ChatTurn } from '../lib/askClaude'
 
 interface FocusViewProps {
   doc: PDFDocumentProxy
@@ -15,7 +16,11 @@ interface FocusViewProps {
   onActiveChange: (index: number) => void
   onChange: (markdown: string) => void
   onExit: () => void
+  conversation?: ChatTurn[]
+  onConversationChange?: (turns: ChatTurn[]) => void
 }
+
+const NO_CONVERSATION: ChatTurn[] = []
 
 export function FocusView({
   doc,
@@ -26,6 +31,8 @@ export function FocusView({
   onActiveChange,
   onChange,
   onExit,
+  conversation = NO_CONVERSATION,
+  onConversationChange = () => {},
 }: FocusViewProps) {
   const railCanvasRef = useRef<HTMLDivElement | null>(null)
   const [renderError, setRenderError] = useState<string | null>(null)
@@ -216,6 +223,8 @@ export function FocusView({
         totalSlides={numPages}
         sessionName={sessionName}
         notes={markdown}
+        conversation={conversation}
+        onConversationChange={onConversationChange}
       />
     </div>
   )

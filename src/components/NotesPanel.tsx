@@ -5,6 +5,7 @@ import Placeholder from '@tiptap/extension-placeholder'
 import { Markdown } from 'tiptap-markdown'
 import { AskClaude } from './AskClaude'
 import type { PDFDocumentProxy } from '../lib/pdf'
+import type { ChatTurn } from '../lib/askClaude'
 
 interface NotesPanelProps {
   slideIndex: number
@@ -14,7 +15,11 @@ interface NotesPanelProps {
   disabled?: boolean
   doc?: PDFDocumentProxy | null
   sessionName?: string
+  conversation?: ChatTurn[]
+  onConversationChange?: (turns: ChatTurn[]) => void
 }
+
+const NO_CONVERSATION: ChatTurn[] = []
 
 export function NotesPanel({
   slideIndex,
@@ -24,6 +29,8 @@ export function NotesPanel({
   disabled,
   doc = null,
   sessionName = '',
+  conversation = NO_CONVERSATION,
+  onConversationChange = () => {},
 }: NotesPanelProps) {
   const onChangeRef = useRef(onChange)
   const lastEmittedRef = useRef<string>(value)
@@ -163,6 +170,8 @@ export function NotesPanel({
         totalSlides={totalSlides}
         sessionName={sessionName}
         notes={value}
+        conversation={conversation}
+        onConversationChange={onConversationChange}
       />
     </section>
   )

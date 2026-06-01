@@ -1,13 +1,26 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 
 const DB_NAME = 'lecturenote-db'
-const DB_VERSION = 3
+const DB_VERSION = 4
 
 export interface NoteRecord {
   key: string
   filename: string
   slideIndex: number
   markdown: string
+  updatedAt: number
+}
+
+export interface ChatTurnRecord {
+  role: 'user' | 'assistant'
+  content: string
+}
+
+export interface ChatRecord {
+  key: string
+  filename: string
+  slideIndex: number
+  turns: ChatTurnRecord[]
   updatedAt: number
 }
 
@@ -48,6 +61,11 @@ interface LectureNoteDB extends DBSchema {
     value: NoteRecord
     indexes: { 'by-filename': string }
   }
+  chats: {
+    key: string
+    value: ChatRecord
+    indexes: { 'by-filename': string }
+  }
   sessions: {
     key: string
     value: SessionRecord
@@ -86,6 +104,12 @@ export function getDB(): Promise<IDBPDatabase<LectureNoteDB>> {
         if (oldVersion < 3) {
           if (!db.objectStoreNames.contains('thumbnails')) {
             db.createObjectStore('thumbnails', { keyPath: 'filename' })
+          }
+        }
+        if (oldVersion < 4) {
+          if (!db.objectStoreNames.contains('chats')) {
+            const chats = db.createObjectStore('chats', { keyPath: 'key' })
+            chats.createIndex('by-filename', 'filename')
           }
         }
       },
@@ -133,6 +157,40 @@ export async function countNotesForFile(filename: string): Promise<number> {
   const db = await getDB()
   const all = await db.getAllFromIndex('notes', 'by-filename', filename)
   return all.reduce((acc, r) => (r.markdown.trim() ? acc + 1 : acc), 0)
+}
+
+export function chatKey(filename: string, slideIndex: number): string {
+  return `${filename}::${slideIndex}`
+}
+
+export async function getAllChatsForFile(
+  filename: string,
+): Promise<Map<number, ChatTurnRecord[]>> {
+  const db = await getDB()
+  const all = await db.getAllFromIndex('chats', 'by-filename', filename)
+  const map = new Map<number, ChatTurnRecord[]>()
+  for (const r of all) map.set(r.slideIndex, r.turns)
+  return map
+}
+
+export async function setChat(
+  filename: string,
+  slideIndex: number,
+  turns: ChatTurnRecord[],
+): Promise<void> {
+  const db = await getDB()
+  const key = chatKey(filename, slideIndex)
+  if (turns.length === 0) {
+    await db.delete('chats', key)
+    return
+  }
+  await db.put('chats', {
+    key,
+    filename,
+    slideIndex,
+    turns,
+    updatedAt: Date.now(),
+  })
 }
 
 export async function getSession(filename: string): Promise<SessionRecord | undefined> {
@@ -262,22 +320,25 @@ export async function setThumbnail(
 export async function deleteLectureEntry(filename: string): Promise<void> {
   const db = await getDB()
   const tx = db.transaction(
-    ['pdfs', 'sessions', 'notes', 'thumbnails'],
+    ['pdfs', 'sessions', 'notes', 'thumbnails', 'chats'],
     'readwrite',
   )
+  const deleteByFilenameIndex = async (
+    store: 'notes' | 'chats',
+  ): Promise<void> => {
+    const idx = tx.objectStore(store).index('by-filename')
+    let cursor = await idx.openCursor(IDBKeyRange.only(filename))
+    while (cursor) {
+      await cursor.delete()
+      cursor = await cursor.continue()
+    }
+  }
   await Promise.all([
     tx.objectStore('pdfs').delete(filename),
     tx.objectStore('sessions').delete(filename),
     tx.objectStore('thumbnails').delete(filename),
-    (async () => {
-      const notesStore = tx.objectStore('notes')
-      const idx = notesStore.index('by-filename')
-      let cursor = await idx.openCursor(IDBKeyRange.only(filename))
-      while (cursor) {
-        await cursor.delete()
-        cursor = await cursor.continue()
-      }
-    })(),
+    deleteByFilenameIndex('notes'),
+    deleteByFilenameIndex('chats'),
   ])
   await tx.done
   const last = await getLastFilename()

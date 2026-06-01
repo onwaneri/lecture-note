@@ -14,6 +14,7 @@ import { LibraryView } from './components/LibraryView'
 import { FocusView } from './components/FocusView'
 import { usePDF } from './hooks/usePDF'
 import { useNotes } from './hooks/useNotes'
+import { useChats } from './hooks/useChats'
 import { useExport } from './hooks/useExport'
 import {
   getLastFilename,
@@ -51,6 +52,7 @@ export function App() {
   const numPages = pdf?.numPages ?? 0
 
   const { notes, getNote, updateNote } = useNotes(filename)
+  const { getChat, updateChat } = useChats(filename)
   const { run: runExport, exporting } = useExport({
     doc: pdf?.doc ?? null,
     numPages,
@@ -297,6 +299,8 @@ export function App() {
             onActiveChange={setActiveIndex}
             onChange={(md) => updateNote(activeIndex, md)}
             onExit={() => setView('lecture')}
+            conversation={getChat(activeIndex)}
+            onConversationChange={(turns) => updateChat(activeIndex, turns)}
           />
         ) : !pdf ? (
           <div className={`dropzone ${dragOver ? 'drag-over' : ''}`}>
@@ -397,6 +401,8 @@ export function App() {
               onChange={(md) => updateNote(activeIndex, md)}
               doc={pdf.doc}
               sessionName={sessionName}
+              conversation={getChat(activeIndex)}
+              onConversationChange={(turns) => updateChat(activeIndex, turns)}
             />
           </>
         )}

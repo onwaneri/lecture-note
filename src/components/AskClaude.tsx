@@ -15,6 +15,10 @@ interface AskClaudeProps {
   totalSlides: number
   sessionName: string
   notes: string
+  /** Persisted conversation for the current slide (role + content only). */
+  conversation: ChatTurn[]
+  /** Persist the conversation for the current slide. */
+  onConversationChange: (turns: ChatTurn[]) => void
   /** 'inline' docks at the bottom of the notes panel; 'floating' pops out. */
   variant: 'inline' | 'floating'
 }
@@ -35,6 +39,8 @@ export function AskClaude({
   totalSlides,
   sessionName,
   notes,
+  conversation,
+  onConversationChange,
   variant,
 }: AskClaudeProps) {
   const keyed = hasApiKey()
@@ -49,13 +55,30 @@ export function AskClaude({
   const logRef = useRef<HTMLDivElement | null>(null)
   const panelRef = useRef<HTMLElement | null>(null)
 
-  // Fresh conversation when the slide changes — context shifts per slide.
+  // Refs keep the latest persisted conversation + persist callback without
+  // forcing the load/persist effects to re-run (which would loop or clobber).
+  const conversationRef = useRef(conversation)
+  conversationRef.current = conversation
+  const onConversationChangeRef = useRef(onConversationChange)
+  onConversationChangeRef.current = onConversationChange
+
+  // Load the persisted conversation when the slide changes — context shifts
+  // per slide, and returning to a slide should restore where we left off.
   useEffect(() => {
     abortRef.current?.abort()
-    setTurns([])
+    setTurns(conversationRef.current.map((t) => ({ ...t })))
     setError(null)
     setBusy(false)
   }, [slideIndex])
+
+  // Persist completed conversations. Skip while a turn is still streaming so
+  // we don't save half-written answers; the final state flushes once done.
+  useEffect(() => {
+    if (turns.some((t) => t.pending)) return
+    onConversationChangeRef.current(
+      turns.map(({ role, content }) => ({ role, content })),
+    )
+  }, [turns])
 
   // Stop any in-flight request on unmount.
   useEffect(() => () => abortRef.current?.abort(), [])
