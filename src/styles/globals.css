@@ -2996,3 +2996,112 @@ button:disabled {
 .prep-chat-send:hover:not(:disabled) {
   opacity: 0.85;
 }
+
+/* ── Auth gate ──────────────────────────────────────── */
+.auth-screen {
+  height: 100vh;
+  width: 100vw;
+  display: grid;
+  place-items: center;
+  background: var(--ate-bg);
+  padding: 24px;
+}
+.auth-card {
+  background: var(--ate-surface);
+  border: 1px solid var(--ate-rule);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 40px 36px;
+  max-width: 380px;
+  width: 100%;
+  text-align: center;
+}
+.auth-brand {
+  justify-content: center;
+  margin-bottom: 20px;
+}
+.auth-title {
+  font-family: var(--font-display);
+  font-size: 26px;
+  color: var(--ate-ink);
+  margin: 0 0 8px;
+}
+.auth-sub {
+  font-family: var(--font-ui);
+  font-size: 14px;
+  color: var(--ate-muted);
+  line-height: 1.5;
+  margin: 0 0 24px;
+}
+.auth-google {
+  width: 100%;
+  justify-content: center;
+  height: 42px;
+}
+.auth-error {
+  font-family: var(--font-ui);
+  font-size: 13px;
+  color: var(--ate-red);
+  margin-top: 14px;
+}
+.auth-spinner {
+  width: 32px;
+  height: 32px;
+  border: 3px solid var(--ate-rule);
+  border-top-color: var(--ate-accent);
+  border-radius: 50%;
+  margin: 0 auto 14px;
+  animation: prep-spin 0.8s linear infinite;
+}
+
+.auth-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  margin: 16px 0;
+  color: var(--ate-faint);
+  font-family: var(--font-ui);
+  font-size: 12px;
+}
+.auth-divider::before,
+.auth-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--ate-rule);
+}
+.auth-divider span {
+  padding: 0 12px;
+}
+.auth-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.auth-input {
+  width: 100%;
+  height: 40px;
+  padding: 0 12px;
+  border: 1px solid var(--ate-rule);
+  border-radius: var(--radius-md);
+  background: var(--ate-surface);
+  color: var(--ate-ink);
+  font-family: var(--font-ui);
+  font-size: 14px;
+}
+.auth-input:focus {
+  outline: none;
+  border-color: var(--ate-accent);
+}
+.auth-toggle {
+  margin-top: 16px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--ate-accent);
+  font-family: var(--font-ui);
+  font-size: 13px;
+}
+.auth-toggle:hover {
+  text-decoration: underline;
+}

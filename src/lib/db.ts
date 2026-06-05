@@ -1,7 +1,37 @@
-import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
+// Persistence layer — Firebase backed.
+//
+// Data records live in Firestore under `users/{uid}/...` (synced + offline via
+// persistentLocalCache). PDF bytes live in Cloud Storage (`users/{uid}/pdfs/...`)
+// with a local IndexedDB byte cache (pdfCache.ts) for instant/offline access.
+// Thumbnails are local-only (regenerable). The exported API is unchanged from the
+// old IndexedDB implementation so no call site needed to change.
 
-const DB_NAME = 'lecturenote-db'
-const DB_VERSION = 5
+import {
+  collection,
+  deleteDoc,
+  doc,
+  getDoc,
+  getDocs,
+  query,
+  setDoc,
+  where,
+  writeBatch,
+} from 'firebase/firestore'
+import {
+  deleteObject,
+  getBytes,
+  ref as storageRef,
+  uploadBytes,
+} from 'firebase/storage'
+import { getDb, getFirebaseStorage, requireUid } from './firebase'
+import {
+  cacheDeletePDF,
+  cacheDeleteThumb,
+  cacheGetPDF,
+  cacheGetThumb,
+  cachePutPDF,
+  cachePutThumb,
+} from './pdfCache'
 
 export interface NoteRecord {
   key: string
@@ -117,7 +147,7 @@ export const MASTERY_CONFIGS: Record<PrepDifficulty, MasteryConfig> = {
 export const MAX_PREP_FILES = 15
 
 export interface PrepDocRef {
-  /** Key into the `pdfs` store. */
+  /** Key into the PDF store / Storage. */
   filename: string
   role: PrepDocRole
   displayName: string
@@ -237,9 +267,9 @@ export function ensureKCs(topic: CurriculumTopic): KnowledgeComponent[] {
 
 export interface PDFRecord {
   filename: string
-  blob: Blob
   byteSize: number
   addedAt: number
+  storagePath: string
 }
 
 export interface ThumbnailRecord {
@@ -258,97 +288,32 @@ export interface LibraryEntry {
   byteSize: number
 }
 
-interface LectureNoteDB extends DBSchema {
-  notes: {
-    key: string
-    value: NoteRecord
-    indexes: { 'by-filename': string }
-  }
-  chats: {
-    key: string
-    value: ChatRecord
-    indexes: { 'by-filename': string }
-  }
-  prepSessions: {
-    key: string
-    value: PrepSessionRecord
-  }
-  prepTopicProgress: {
-    key: string
-    value: PrepTopicProgressRecord
-    indexes: { 'by-session': string }
-  }
-  sessions: {
-    key: string
-    value: SessionRecord
-  }
-  pdfs: {
-    key: string
-    value: PDFRecord
-  }
-  thumbnails: {
-    key: string
-    value: ThumbnailRecord
-  }
-  meta: {
-    key: string
-    value: { key: string; value: string }
-  }
+// --- Firestore plumbing -----------------------------------------------------
+
+/** Firestore doc IDs can't contain '/'. Encode keys to a safe id. */
+function did(key: string): string {
+  return encodeURIComponent(key)
 }
 
-let dbPromise: Promise<IDBPDatabase<LectureNoteDB>> | null = null
-
-export function getDB(): Promise<IDBPDatabase<LectureNoteDB>> {
-  if (!dbPromise) {
-    dbPromise = openDB<LectureNoteDB>(DB_NAME, DB_VERSION, {
-      upgrade(db, oldVersion) {
-        if (oldVersion < 1) {
-          const notes = db.createObjectStore('notes', { keyPath: 'key' })
-          notes.createIndex('by-filename', 'filename')
-          db.createObjectStore('sessions', { keyPath: 'filename' })
-          db.createObjectStore('meta', { keyPath: 'key' })
-        }
-        if (oldVersion < 2) {
-          if (!db.objectStoreNames.contains('pdfs')) {
-            db.createObjectStore('pdfs', { keyPath: 'filename' })
-          }
-        }
-        if (oldVersion < 3) {
-          if (!db.objectStoreNames.contains('thumbnails')) {
-            db.createObjectStore('thumbnails', { keyPath: 'filename' })
-          }
-        }
-        if (oldVersion < 4) {
-          if (!db.objectStoreNames.contains('chats')) {
-            const chats = db.createObjectStore('chats', { keyPath: 'key' })
-            chats.createIndex('by-filename', 'filename')
-          }
-        }
-        if (oldVersion < 5) {
-          if (!db.objectStoreNames.contains('prepSessions')) {
-            db.createObjectStore('prepSessions', { keyPath: 'sessionId' })
-          }
-          if (!db.objectStoreNames.contains('prepTopicProgress')) {
-            const prog = db.createObjectStore('prepTopicProgress', {
-              keyPath: 'key',
-            })
-            prog.createIndex('by-session', 'sessionId')
-          }
-        }
-      },
-    })
-  }
-  return dbPromise
+/** A per-user collection reference. */
+function col(name: string) {
+  return collection(getDb(), 'users', requireUid(), name)
 }
+
+/** A per-user document reference (id sanitized). */
+function dref(name: string, id: string) {
+  return doc(getDb(), 'users', requireUid(), name, did(id))
+}
+
+// --- Notes ------------------------------------------------------------------
 
 export function noteKey(filename: string, slideIndex: number): string {
   return `${filename}::${slideIndex}`
 }
 
 export async function getNote(filename: string, slideIndex: number): Promise<string> {
-  const db = await getDB()
-  const rec = await db.get('notes', noteKey(filename, slideIndex))
-  return rec?.markdown ?? ''
+  const snap = await getDoc(dref('notes', noteKey(filename, slideIndex)))
+  return (snap.data() as NoteRecord | undefined)?.markdown ?? ''
 }
 
 export async function setNote(
@@ -356,31 +321,38 @@ export async function setNote(
   slideIndex: number,
   markdown: string,
 ): Promise<void> {
-  const db = await getDB()
-  await db.put('notes', {
-    key: noteKey(filename, slideIndex),
+  const key = noteKey(filename, slideIndex)
+  await setDoc(dref('notes', key), {
+    key,
     filename,
     slideIndex,
     markdown,
     updatedAt: Date.now(),
-  })
+  } satisfies NoteRecord)
 }
 
 export async function getAllNotesForFile(
   filename: string,
 ): Promise<Map<number, string>> {
-  const db = await getDB()
-  const all = await db.getAllFromIndex('notes', 'by-filename', filename)
+  const snaps = await getDocs(query(col('notes'), where('filename', '==', filename)))
   const map = new Map<number, string>()
-  for (const r of all) map.set(r.slideIndex, r.markdown)
+  snaps.forEach((s) => {
+    const r = s.data() as NoteRecord
+    map.set(r.slideIndex, r.markdown)
+  })
   return map
 }
 
 export async function countNotesForFile(filename: string): Promise<number> {
-  const db = await getDB()
-  const all = await db.getAllFromIndex('notes', 'by-filename', filename)
-  return all.reduce((acc, r) => (r.markdown.trim() ? acc + 1 : acc), 0)
+  const snaps = await getDocs(query(col('notes'), where('filename', '==', filename)))
+  let count = 0
+  snaps.forEach((s) => {
+    if ((s.data() as NoteRecord).markdown.trim()) count++
+  })
+  return count
 }
+
+// --- Chats ------------------------------------------------------------------
 
 export function chatKey(filename: string, slideIndex: number): string {
   return `${filename}::${slideIndex}`
@@ -389,10 +361,12 @@ export function chatKey(filename: string, slideIndex: number): string {
 export async function getAllChatsForFile(
   filename: string,
 ): Promise<Map<number, ChatTurnRecord[]>> {
-  const db = await getDB()
-  const all = await db.getAllFromIndex('chats', 'by-filename', filename)
+  const snaps = await getDocs(query(col('chats'), where('filename', '==', filename)))
   const map = new Map<number, ChatTurnRecord[]>()
-  for (const r of all) map.set(r.slideIndex, r.turns)
+  snaps.forEach((s) => {
+    const r = s.data() as ChatRecord
+    map.set(r.slideIndex, r.turns)
+  })
   return map
 }
 
@@ -401,19 +375,18 @@ export async function setChat(
   slideIndex: number,
   turns: ChatTurnRecord[],
 ): Promise<void> {
-  const db = await getDB()
   const key = chatKey(filename, slideIndex)
   if (turns.length === 0) {
-    await db.delete('chats', key)
+    await deleteDoc(dref('chats', key))
     return
   }
-  await db.put('chats', {
+  await setDoc(dref('chats', key), {
     key,
     filename,
     slideIndex,
     turns,
     updatedAt: Date.now(),
-  })
+  } satisfies ChatRecord)
 }
 
 // --- Test Prep CRUD ---------------------------------------------------------
@@ -422,104 +395,97 @@ export function progressKey(sessionId: string, topicId: string): string {
   return `${sessionId}::${topicId}`
 }
 
-export async function createPrepSession(
-  record: PrepSessionRecord,
-): Promise<void> {
-  const db = await getDB()
-  await db.put('prepSessions', record)
+export async function createPrepSession(record: PrepSessionRecord): Promise<void> {
+  await setDoc(dref('prepSessions', record.sessionId), record)
 }
 
 export async function getPrepSession(
   sessionId: string,
 ): Promise<PrepSessionRecord | undefined> {
-  const db = await getDB()
-  const rec = await db.get('prepSessions', sessionId)
+  const snap = await getDoc(dref('prepSessions', sessionId))
+  const rec = snap.data() as PrepSessionRecord | undefined
   if (rec) rec.difficulty = normalizeDifficulty(rec.difficulty)
   return rec
 }
 
 export async function listPrepSessions(): Promise<PrepSessionRecord[]> {
-  const db = await getDB()
-  const all = await db.getAll('prepSessions')
-  for (const rec of all) rec.difficulty = normalizeDifficulty(rec.difficulty)
+  const snaps = await getDocs(col('prepSessions'))
+  const all: PrepSessionRecord[] = []
+  snaps.forEach((s) => {
+    const rec = s.data() as PrepSessionRecord
+    rec.difficulty = normalizeDifficulty(rec.difficulty)
+    all.push(rec)
+  })
   all.sort((a, b) => b.updatedAt - a.updatedAt)
   return all
 }
 
-export async function updatePrepSession(
-  record: PrepSessionRecord,
-): Promise<void> {
-  const db = await getDB()
-  await db.put('prepSessions', { ...record, updatedAt: Date.now() })
+export async function updatePrepSession(record: PrepSessionRecord): Promise<void> {
+  await setDoc(dref('prepSessions', record.sessionId), {
+    ...record,
+    updatedAt: Date.now(),
+  })
 }
 
 export async function deletePrepSession(sessionId: string): Promise<void> {
-  const db = await getDB()
-  const tx = db.transaction(['prepSessions', 'prepTopicProgress'], 'readwrite')
-  const idx = tx.objectStore('prepTopicProgress').index('by-session')
-  let cursor = await idx.openCursor(IDBKeyRange.only(sessionId))
-  while (cursor) {
-    await cursor.delete()
-    cursor = await cursor.continue()
-  }
-  await tx.objectStore('prepSessions').delete(sessionId)
-  await tx.done
+  const progressSnaps = await getDocs(
+    query(col('prepProgress'), where('sessionId', '==', sessionId)),
+  )
+  const batch = writeBatch(getDb())
+  progressSnaps.forEach((s) => batch.delete(s.ref))
+  batch.delete(dref('prepSessions', sessionId))
+  await batch.commit()
 }
 
-export async function resetSessionProgress(
-  sessionId: string,
-): Promise<void> {
-  const db = await getDB()
-  const tx = db.transaction('prepTopicProgress', 'readwrite')
-  const idx = tx.store.index('by-session')
-  let cursor = await idx.openCursor(IDBKeyRange.only(sessionId))
-  while (cursor) {
-    await cursor.delete()
-    cursor = await cursor.continue()
-  }
-  await tx.done
+export async function resetSessionProgress(sessionId: string): Promise<void> {
+  const snaps = await getDocs(
+    query(col('prepProgress'), where('sessionId', '==', sessionId)),
+  )
+  const batch = writeBatch(getDb())
+  snaps.forEach((s) => batch.delete(s.ref))
+  await batch.commit()
 }
 
 export async function getAllProgressForSession(
   sessionId: string,
 ): Promise<Map<string, PrepTopicProgressRecord>> {
-  const db = await getDB()
-  const all = await db.getAllFromIndex(
-    'prepTopicProgress',
-    'by-session',
-    sessionId,
+  const snaps = await getDocs(
+    query(col('prepProgress'), where('sessionId', '==', sessionId)),
   )
   const map = new Map<string, PrepTopicProgressRecord>()
-  for (const r of all) map.set(r.topicId, r)
+  snaps.forEach((s) => {
+    const r = s.data() as PrepTopicProgressRecord
+    map.set(r.topicId, r)
+  })
   return map
 }
 
 export async function putTopicProgress(
   record: PrepTopicProgressRecord,
 ): Promise<void> {
-  const db = await getDB()
-  await db.put('prepTopicProgress', record)
+  await setDoc(dref('prepProgress', record.key), record)
 }
 
+// --- Sessions ---------------------------------------------------------------
+
 export async function getSession(filename: string): Promise<SessionRecord | undefined> {
-  const db = await getDB()
-  return db.get('sessions', filename)
+  const snap = await getDoc(dref('sessions', filename))
+  return snap.data() as SessionRecord | undefined
 }
 
 export async function ensureSession(
   filename: string,
   defaultName: string,
 ): Promise<void> {
-  const db = await getDB()
-  const existing = await db.get('sessions', filename)
+  const existing = await getSession(filename)
   if (existing) {
-    await db.put('sessions', { ...existing, lastOpenedAt: Date.now() })
+    await setDoc(dref('sessions', filename), { lastOpenedAt: Date.now() }, { merge: true })
   } else {
-    await db.put('sessions', {
+    await setDoc(dref('sessions', filename), {
       filename,
       sessionName: defaultName,
       lastOpenedAt: Date.now(),
-    })
+    } satisfies SessionRecord)
   }
 }
 
@@ -527,52 +493,47 @@ export async function renameSession(
   filename: string,
   sessionName: string,
 ): Promise<void> {
-  const db = await getDB()
-  const existing = await db.get('sessions', filename)
+  const existing = await getSession(filename)
   if (!existing) return
-  await db.put('sessions', { ...existing, sessionName })
+  await setDoc(dref('sessions', filename), { sessionName }, { merge: true })
 }
 
 export async function setActiveSlide(
   filename: string,
   activeSlideIndex: number,
 ): Promise<void> {
-  const db = await getDB()
-  const existing = await db.get('sessions', filename)
+  const existing = await getSession(filename)
   if (!existing) return
-  await db.put('sessions', {
-    ...existing,
-    activeSlideIndex,
-    lastOpenedAt: Date.now(),
-  })
+  await setDoc(
+    dref('sessions', filename),
+    { activeSlideIndex, lastOpenedAt: Date.now() },
+    { merge: true },
+  )
 }
 
-export async function setNumPages(
-  filename: string,
-  numPages: number,
-): Promise<void> {
-  const db = await getDB()
-  const existing = await db.get('sessions', filename)
+export async function setNumPages(filename: string, numPages: number): Promise<void> {
+  const existing = await getSession(filename)
   if (!existing) return
   if (existing.numPages === numPages) return
-  await db.put('sessions', { ...existing, numPages })
+  await setDoc(dref('sessions', filename), { numPages }, { merge: true })
 }
 
+// --- Meta -------------------------------------------------------------------
+
 export async function getLastFilename(): Promise<string | null> {
-  const db = await getDB()
-  const rec = await db.get('meta', 'lastFilename')
-  return rec?.value ?? null
+  const snap = await getDoc(dref('meta', 'lastFilename'))
+  return (snap.data() as { value: string } | undefined)?.value ?? null
 }
 
 export async function setLastFilename(filename: string): Promise<void> {
-  const db = await getDB()
-  await db.put('meta', { key: 'lastFilename', value: filename })
+  await setDoc(dref('meta', 'lastFilename'), { key: 'lastFilename', value: filename })
 }
 
 export async function clearLastFilename(): Promise<void> {
-  const db = await getDB()
-  await db.delete('meta', 'lastFilename')
+  await deleteDoc(dref('meta', 'lastFilename'))
 }
+
+// --- PDFs (Cloud Storage + local cache) -------------------------------------
 
 export class QuotaExceededWhileSavingPDF extends Error {
   constructor() {
@@ -581,96 +542,101 @@ export class QuotaExceededWhileSavingPDF extends Error {
   }
 }
 
+function pdfStoragePath(filename: string): string {
+  return `users/${requireUid()}/pdfs/${encodeURIComponent(filename)}`
+}
+
+function pdfRef(filename: string) {
+  return storageRef(getFirebaseStorage(), pdfStoragePath(filename))
+}
+
 export async function savePDF(filename: string, blob: Blob): Promise<void> {
-  const db = await getDB()
-  const record: PDFRecord = {
+  // Cache locally first (instant + offline); Storage is the durable synced copy.
+  await cachePutPDF(filename, blob)
+  await uploadBytes(pdfRef(filename), blob, { contentType: 'application/pdf' })
+  await setDoc(dref('pdfMeta', filename), {
     filename,
-    blob,
     byteSize: blob.size,
     addedAt: Date.now(),
-  }
-  try {
-    await db.put('pdfs', record)
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'QuotaExceededError') {
-      throw new QuotaExceededWhileSavingPDF()
-    }
-    throw e
-  }
+    storagePath: pdfStoragePath(filename),
+  } satisfies PDFRecord)
 }
 
 export async function getPDF(filename: string): Promise<Blob | undefined> {
-  const db = await getDB()
-  const rec = await db.get('pdfs', filename)
-  return rec?.blob
+  const cached = await cacheGetPDF(filename)
+  if (cached) return cached
+  try {
+    const bytes = await getBytes(pdfRef(filename))
+    const blob = new Blob([bytes], { type: 'application/pdf' })
+    await cachePutPDF(filename, blob)
+    return blob
+  } catch (e) {
+    // Not found, offline + uncached, or permission — caller handles undefined.
+    console.warn('getPDF download failed', filename, e)
+    return undefined
+  }
 }
 
 export async function hasPDF(filename: string): Promise<boolean> {
-  const db = await getDB()
-  const keys = await db.getAllKeys('pdfs', IDBKeyRange.only(filename))
-  return keys.length > 0
+  if (await cacheGetPDF(filename)) return true
+  const snap = await getDoc(dref('pdfMeta', filename))
+  return snap.exists()
 }
 
 export async function getThumbnail(filename: string): Promise<string | undefined> {
-  const db = await getDB()
-  const rec = await db.get('thumbnails', filename)
-  return rec?.dataURL
+  return cacheGetThumb(filename)
 }
 
-export async function setThumbnail(
-  filename: string,
-  dataURL: string,
-): Promise<void> {
-  const db = await getDB()
-  await db.put('thumbnails', { filename, dataURL, generatedAt: Date.now() })
+export async function setThumbnail(filename: string, dataURL: string): Promise<void> {
+  await cachePutThumb(filename, dataURL)
 }
 
 export async function deleteLectureEntry(filename: string): Promise<void> {
-  const db = await getDB()
-  const tx = db.transaction(
-    ['pdfs', 'sessions', 'notes', 'thumbnails', 'chats'],
-    'readwrite',
-  )
-  const deleteByFilenameIndex = async (
-    store: 'notes' | 'chats',
-  ): Promise<void> => {
-    const idx = tx.objectStore(store).index('by-filename')
-    let cursor = await idx.openCursor(IDBKeyRange.only(filename))
-    while (cursor) {
-      await cursor.delete()
-      cursor = await cursor.continue()
-    }
-  }
-  await Promise.all([
-    tx.objectStore('pdfs').delete(filename),
-    tx.objectStore('sessions').delete(filename),
-    tx.objectStore('thumbnails').delete(filename),
-    deleteByFilenameIndex('notes'),
-    deleteByFilenameIndex('chats'),
+  // Firestore: session + pdfMeta + all notes/chats for this file.
+  const [noteSnaps, chatSnaps] = await Promise.all([
+    getDocs(query(col('notes'), where('filename', '==', filename))),
+    getDocs(query(col('chats'), where('filename', '==', filename))),
   ])
-  await tx.done
+  const batch = writeBatch(getDb())
+  noteSnaps.forEach((s) => batch.delete(s.ref))
+  chatSnaps.forEach((s) => batch.delete(s.ref))
+  batch.delete(dref('sessions', filename))
+  batch.delete(dref('pdfMeta', filename))
+  await batch.commit()
+
+  // Storage object + local caches.
+  await deleteObject(pdfRef(filename)).catch(() => {
+    /* already gone / offline */
+  })
+  await Promise.all([cacheDeletePDF(filename), cacheDeleteThumb(filename)])
+
   const last = await getLastFilename()
   if (last === filename) await clearLastFilename()
 }
 
 export async function listLibrary(): Promise<LibraryEntry[]> {
-  const db = await getDB()
-  const sessions = await db.getAll('sessions')
+  const sessionSnaps = await getDocs(col('sessions'))
+  const sessions: SessionRecord[] = []
+  sessionSnaps.forEach((s) => sessions.push(s.data() as SessionRecord))
+
   const entries: LibraryEntry[] = []
-  for (const s of sessions) {
-    const pdfRec = await db.get('pdfs', s.filename)
-    if (!pdfRec) continue
-    const notesCount = await countNotesForFile(s.filename)
-    entries.push({
-      filename: s.filename,
-      sessionName: s.sessionName,
-      lastOpenedAt: s.lastOpenedAt,
-      activeSlideIndex: s.activeSlideIndex ?? 0,
-      numPages: s.numPages ?? 0,
-      notesCount,
-      byteSize: pdfRec.byteSize,
-    })
-  }
+  await Promise.all(
+    sessions.map(async (s) => {
+      const metaSnap = await getDoc(dref('pdfMeta', s.filename))
+      if (!metaSnap.exists()) return
+      const meta = metaSnap.data() as PDFRecord
+      const notesCount = await countNotesForFile(s.filename)
+      entries.push({
+        filename: s.filename,
+        sessionName: s.sessionName,
+        lastOpenedAt: s.lastOpenedAt,
+        activeSlideIndex: s.activeSlideIndex ?? 0,
+        numPages: s.numPages ?? 0,
+        notesCount,
+        byteSize: meta.byteSize,
+      })
+    }),
+  )
   entries.sort((a, b) => b.lastOpenedAt - a.lastOpenedAt)
   return entries
 }
