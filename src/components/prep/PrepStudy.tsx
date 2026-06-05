@@ -178,12 +178,10 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
 
       const topic = topics.find((t) => t.id === topicId)
       if (!topic) return
-      const existing = progress.get(topicId)
-      const prevTurns = existing?.turns ?? []
-      const accumulated = Math.min(
-        topic.masteryThreshold,
-        (existing?.masteryAccumulated ?? 0) + turn.score,
-      )
+
+      // Read from ref (not closure) so we always see the latest state,
+      // even if two turns are submitted before React re-renders.
+      const existing = progressRef.current.get(topicId)
 
       // Post-answer hook: update retry queue + KC mastery.
       const postResult = onAnswerGraded(
@@ -197,23 +195,31 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
       retryQueueRef.current = postResult.retryQueue
       sessionTurnCountRef.current++
 
-      // Compound mastery check.
-      const updatedRecord: PrepTopicProgressRecord = {
-        key: progressKey(session.sessionId, topicId),
-        sessionId: session.sessionId,
-        topicId,
-        status: 'unlocked',
-        masteryAccumulated: accumulated,
-        turns: [...prevTurns, turn],
-        overview: existing?.overview,
-        kcMastery: postResult.kcMastery,
-      }
-      updatedRecord.status = canMarkMastered(topic, updatedRecord, config)
-        ? 'mastered'
-        : 'unlocked'
-
-      await putTopicProgress(updatedRecord)
+      // Build the record inside setProgress so we merge with the true
+      // latest state — prevents saveOverview or a concurrent recordTurn
+      // from clobbering our update.
       setProgress((prev) => {
+        const latest = prev.get(topicId)
+        const accumulated = Math.min(
+          topic.masteryThreshold,
+          (latest?.masteryAccumulated ?? 0) + turn.score,
+        )
+        const updatedRecord: PrepTopicProgressRecord = {
+          key: progressKey(session.sessionId, topicId),
+          sessionId: session.sessionId,
+          topicId,
+          status: 'unlocked',
+          masteryAccumulated: accumulated,
+          turns: [...(latest?.turns ?? []), turn],
+          overview: latest?.overview,
+          kcMastery: postResult.kcMastery,
+        }
+        updatedRecord.status = canMarkMastered(topic, updatedRecord, config)
+          ? 'mastered'
+          : 'unlocked'
+
+        void putTopicProgress(updatedRecord)
+
         const next = new Map(prev)
         next.set(topicId, updatedRecord)
         const allMastered = topics.every(
@@ -226,7 +232,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
         return next
       })
     },
-    [progress, session, topics, config],
+    [session, topics, config],
   )
 
   // Persist a topic's teaching overview, preserving any other progress fields.
@@ -234,19 +240,22 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
   // concurrently-recorded turn.
   const saveOverview = useCallback(
     async (topicId: string, overview: string) => {
-      const existing = progressRef.current.get(topicId)
-      const record: PrepTopicProgressRecord = {
-        key: progressKey(session.sessionId, topicId),
-        sessionId: session.sessionId,
-        topicId,
-        status: existing?.status ?? 'unlocked',
-        masteryAccumulated: existing?.masteryAccumulated ?? 0,
-        turns: existing?.turns ?? [],
-        overview,
-        kcMastery: existing?.kcMastery,
-      }
-      await putTopicProgress(record)
+      // Build the record inside setProgress so we merge with the true
+      // latest state — a concurrent recordTurn may have updated points
+      // between when the overview started generating and when it finished.
       setProgress((prev) => {
+        const existing = prev.get(topicId)
+        const record: PrepTopicProgressRecord = {
+          key: progressKey(session.sessionId, topicId),
+          sessionId: session.sessionId,
+          topicId,
+          status: existing?.status ?? 'unlocked',
+          masteryAccumulated: existing?.masteryAccumulated ?? 0,
+          turns: existing?.turns ?? [],
+          overview,
+          kcMastery: existing?.kcMastery,
+        }
+        void putTopicProgress(record)
         const next = new Map(prev)
         next.set(topicId, record)
         return next
