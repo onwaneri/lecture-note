@@ -13,10 +13,11 @@ interface HeaderProps {
   notes: Map<number, string>
   exporting: boolean
   onExport: () => void
-  view: 'lecture' | 'library' | 'focus'
+  view: 'lecture' | 'library' | 'focus' | 'prep'
   libraryCount: number
   onToggleLibrary: () => void
   onToggleFocus: () => void
+  onToggleTestPrep: () => void
 }
 
 export function Header({
@@ -34,6 +35,7 @@ export function Header({
   libraryCount,
   onToggleLibrary,
   onToggleFocus,
+  onToggleTestPrep,
 }: HeaderProps) {
   function handleInput(e: ChangeEvent<HTMLInputElement>) {
     onSessionNameChange(e.target.value)
@@ -42,6 +44,7 @@ export function Header({
   const showMiddle = view === 'lecture' || view === 'focus'
   const showExport = view === 'lecture'
   const showFocus = (view === 'lecture' || view === 'focus') && doc !== null
+  const showTestPrep = view !== 'focus'
   const libraryLabel = view === 'library' ? 'Back' : 'Library'
 
   return (
@@ -94,6 +97,16 @@ export function Header({
         <button type="button" onClick={onOpenFile} className="ate-btn">
           {filename ? 'Open new' : 'Open PDF'}
         </button>
+        {showTestPrep ? (
+          <button
+            type="button"
+            onClick={onToggleTestPrep}
+            className={`ate-btn ${view === 'prep' ? 'active' : ''}`}
+            title="Test Prep Mode"
+          >
+            {view === 'prep' ? 'Exit prep' : 'Test Prep'}
+          </button>
+        ) : null}
         {showFocus ? (
           <button
             type="button"

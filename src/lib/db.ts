@@ -1,7 +1,7 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb'
 
 const DB_NAME = 'lecturenote-db'
-const DB_VERSION = 4
+const DB_VERSION = 5
 
 export interface NoteRecord {
   key: string
@@ -30,6 +30,209 @@ export interface SessionRecord {
   lastOpenedAt: number
   activeSlideIndex?: number
   numPages?: number
+}
+
+// --- Test Prep Mode ---------------------------------------------------------
+
+export type PrepDifficulty = 'foundational' | 'thorough' | 'exam-ready'
+
+/** Legacy difficulty values from pre-migration sessions. */
+type LegacyDifficulty = 'light' | 'medium' | 'hard'
+
+const LEGACY_DIFFICULTY_MAP: Record<LegacyDifficulty, PrepDifficulty> = {
+  light: 'foundational',
+  medium: 'thorough',
+  hard: 'exam-ready',
+}
+
+/** Normalise a difficulty value, mapping legacy names if needed. */
+export function normalizeDifficulty(d: string): PrepDifficulty {
+  if (d in LEGACY_DIFFICULTY_MAP) return LEGACY_DIFFICULTY_MAP[d as LegacyDifficulty]
+  return d as PrepDifficulty
+}
+export type PrepDocRole = 'lecture' | 'homework' | 'exam' | 'topic-sheet'
+/** Awarded credit per answer — quarter-point increments out of 1. */
+export type PrepScore = 0 | 0.25 | 0.5 | 0.75 | 1
+
+/** Points required to master one topic, by difficulty tier. */
+export const MASTERY_THRESHOLDS: Record<PrepDifficulty, number> = {
+  foundational: 3,
+  thorough: 5,
+  'exam-ready': 7,
+}
+
+/** Configuration for mastery checking per difficulty mode. */
+export interface MasteryConfig {
+  pointThreshold: number
+  /** Minimum times each KC must be tested. */
+  minKCAttempts: number
+  /** Minimum average score across KC attempts (null = no constraint). */
+  minKCAvgScore: number | null
+  /** At least one question must reach this difficulty level (null = no constraint). */
+  minDifficultyReached: number | null
+  /** Whether interleaving is active (and when). */
+  interleaving: 'off' | 'after-wrong' | 'full'
+  /** Retry queue enabled? */
+  retryEnabled: boolean
+  /** Number of questions before a failed item is retried. */
+  retryDelay: number
+  /** Inject review questions every N turns from mastered topics (0 = off). */
+  reviewInterval: number
+}
+
+export const MASTERY_CONFIGS: Record<PrepDifficulty, MasteryConfig> = {
+  foundational: {
+    pointThreshold: 3,
+    minKCAttempts: 1,
+    minKCAvgScore: null,
+    minDifficultyReached: null,
+    interleaving: 'off',
+    retryEnabled: false,
+    retryDelay: 3,
+    reviewInterval: 0,
+  },
+  thorough: {
+    pointThreshold: 5,
+    minKCAttempts: 2,
+    minKCAvgScore: null,
+    minDifficultyReached: 3,
+    interleaving: 'after-wrong',
+    retryEnabled: true,
+    retryDelay: 3,
+    reviewInterval: 0,
+  },
+  'exam-ready': {
+    pointThreshold: 7,
+    minKCAttempts: 2,
+    minKCAvgScore: 0.75,
+    minDifficultyReached: 4,
+    interleaving: 'full',
+    retryEnabled: true,
+    retryDelay: 3,
+    reviewInterval: 5,
+  },
+}
+
+/** Max files a single prep session may ingest. */
+export const MAX_PREP_FILES = 15
+
+export interface PrepDocRef {
+  /** Key into the `pdfs` store. */
+  filename: string
+  role: PrepDocRole
+  displayName: string
+}
+
+export interface KeySlide {
+  filename: string
+  /** 0-based page index. */
+  slideIndex: number
+}
+
+export interface KnowledgeComponent {
+  id: string
+  label: string
+}
+
+export interface CurriculumTopic {
+  id: string
+  title: string
+  /** 1–2 sentence blurb shown on the map. */
+  summary: string
+  keySlides: KeySlide[]
+  masteryThreshold: number
+  /** Sequential position; lower unlocks first. */
+  order: number
+  /** Knowledge components for fine-grained mastery tracking. */
+  knowledgeComponents: KnowledgeComponent[]
+}
+
+/** Structural metadata about a practice exam — never its actual questions. */
+export interface ExamBlueprint {
+  questionTypes: string[]
+  topicWeights: Record<string, number>
+  answerFormatNotes: string
+  difficultyDistribution: {
+    conceptual: number
+    application: number
+    synthesis: number
+  }
+}
+
+export interface CurriculumBlueprint {
+  topics: CurriculumTopic[]
+  /** 'filename::slideIndex' → topicId[] for fast slide→topic lookup. */
+  slideMap: Record<string, string[]>
+  examBlueprint?: ExamBlueprint
+}
+
+export interface PrepSessionRecord {
+  sessionId: string
+  title: string
+  createdAt: number
+  updatedAt: number
+  difficulty: PrepDifficulty
+  status: 'initializing' | 'active' | 'completed'
+  blueprint: CurriculumBlueprint
+  documents: PrepDocRef[]
+}
+
+export interface PrepTurn {
+  questionText: string
+  userAnswer: string
+  score: PrepScore
+  correctComponents: string
+  missingComponents: string
+  correction: string
+  suggestedSlide?: KeySlide
+  timestamp: number
+  /** Which KC this question tested. */
+  kcId?: string
+  /** 1–5 actual difficulty. */
+  difficultyLevel?: number
+  /** Question format. */
+  format?: 'open' | 'mc'
+  /** The 4 MC choices (if mc). */
+  mcChoices?: string[]
+  /** 0-based index of correct answer (if mc). */
+  mcCorrectIndex?: number
+  /** What the student picked (if mc). */
+  mcSelectedIndex?: number
+}
+
+export interface KCMasteryRecord {
+  attempts: number
+  totalScore: number
+}
+
+export interface PrepTopicProgressRecord {
+  /** `${sessionId}::${topicId}` */
+  key: string
+  sessionId: string
+  topicId: string
+  status: 'locked' | 'unlocked' | 'mastered'
+  masteryAccumulated: number
+  turns: PrepTurn[]
+  /** Cached teaching overview (markdown) shown before practice. */
+  overview?: string
+  /** Per-KC mastery tracking. */
+  kcMastery?: Record<string, KCMasteryRecord>
+}
+
+/** Item in the retry queue — a failed concept to re-test after a delay. */
+export interface RetryItem {
+  topicId: string
+  kcId?: string
+  questionsUntilRetry: number
+}
+
+/**
+ * Ensure a CurriculumTopic has KCs — legacy topics without them get a single
+ * fallback KC with the topic title.
+ */
+export function ensureKCs(topic: CurriculumTopic): KnowledgeComponent[] {
+  if (topic.knowledgeComponents?.length) return topic.knowledgeComponents
+  return [{ id: 'kc0', label: topic.title }]
 }
 
 export interface PDFRecord {
@@ -65,6 +268,15 @@ interface LectureNoteDB extends DBSchema {
     key: string
     value: ChatRecord
     indexes: { 'by-filename': string }
+  }
+  prepSessions: {
+    key: string
+    value: PrepSessionRecord
+  }
+  prepTopicProgress: {
+    key: string
+    value: PrepTopicProgressRecord
+    indexes: { 'by-session': string }
   }
   sessions: {
     key: string
@@ -110,6 +322,17 @@ export function getDB(): Promise<IDBPDatabase<LectureNoteDB>> {
           if (!db.objectStoreNames.contains('chats')) {
             const chats = db.createObjectStore('chats', { keyPath: 'key' })
             chats.createIndex('by-filename', 'filename')
+          }
+        }
+        if (oldVersion < 5) {
+          if (!db.objectStoreNames.contains('prepSessions')) {
+            db.createObjectStore('prepSessions', { keyPath: 'sessionId' })
+          }
+          if (!db.objectStoreNames.contains('prepTopicProgress')) {
+            const prog = db.createObjectStore('prepTopicProgress', {
+              keyPath: 'key',
+            })
+            prog.createIndex('by-session', 'sessionId')
           }
         }
       },
@@ -191,6 +414,91 @@ export async function setChat(
     turns,
     updatedAt: Date.now(),
   })
+}
+
+// --- Test Prep CRUD ---------------------------------------------------------
+
+export function progressKey(sessionId: string, topicId: string): string {
+  return `${sessionId}::${topicId}`
+}
+
+export async function createPrepSession(
+  record: PrepSessionRecord,
+): Promise<void> {
+  const db = await getDB()
+  await db.put('prepSessions', record)
+}
+
+export async function getPrepSession(
+  sessionId: string,
+): Promise<PrepSessionRecord | undefined> {
+  const db = await getDB()
+  const rec = await db.get('prepSessions', sessionId)
+  if (rec) rec.difficulty = normalizeDifficulty(rec.difficulty)
+  return rec
+}
+
+export async function listPrepSessions(): Promise<PrepSessionRecord[]> {
+  const db = await getDB()
+  const all = await db.getAll('prepSessions')
+  for (const rec of all) rec.difficulty = normalizeDifficulty(rec.difficulty)
+  all.sort((a, b) => b.updatedAt - a.updatedAt)
+  return all
+}
+
+export async function updatePrepSession(
+  record: PrepSessionRecord,
+): Promise<void> {
+  const db = await getDB()
+  await db.put('prepSessions', { ...record, updatedAt: Date.now() })
+}
+
+export async function deletePrepSession(sessionId: string): Promise<void> {
+  const db = await getDB()
+  const tx = db.transaction(['prepSessions', 'prepTopicProgress'], 'readwrite')
+  const idx = tx.objectStore('prepTopicProgress').index('by-session')
+  let cursor = await idx.openCursor(IDBKeyRange.only(sessionId))
+  while (cursor) {
+    await cursor.delete()
+    cursor = await cursor.continue()
+  }
+  await tx.objectStore('prepSessions').delete(sessionId)
+  await tx.done
+}
+
+export async function resetSessionProgress(
+  sessionId: string,
+): Promise<void> {
+  const db = await getDB()
+  const tx = db.transaction('prepTopicProgress', 'readwrite')
+  const idx = tx.store.index('by-session')
+  let cursor = await idx.openCursor(IDBKeyRange.only(sessionId))
+  while (cursor) {
+    await cursor.delete()
+    cursor = await cursor.continue()
+  }
+  await tx.done
+}
+
+export async function getAllProgressForSession(
+  sessionId: string,
+): Promise<Map<string, PrepTopicProgressRecord>> {
+  const db = await getDB()
+  const all = await db.getAllFromIndex(
+    'prepTopicProgress',
+    'by-session',
+    sessionId,
+  )
+  const map = new Map<string, PrepTopicProgressRecord>()
+  for (const r of all) map.set(r.topicId, r)
+  return map
+}
+
+export async function putTopicProgress(
+  record: PrepTopicProgressRecord,
+): Promise<void> {
+  const db = await getDB()
+  await db.put('prepTopicProgress', record)
 }
 
 export async function getSession(filename: string): Promise<SessionRecord | undefined> {

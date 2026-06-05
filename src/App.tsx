@@ -12,6 +12,7 @@ import { SlideViewer } from './components/SlideViewer'
 import { NotesPanel } from './components/NotesPanel'
 import { LibraryView } from './components/LibraryView'
 import { FocusView } from './components/FocusView'
+import { TestPrepMode } from './components/prep/TestPrepMode'
 import { usePDF } from './hooks/usePDF'
 import { useNotes } from './hooks/useNotes'
 import { useChats } from './hooks/useChats'
@@ -25,7 +26,7 @@ import {
   setActiveSlide,
 } from './lib/db'
 
-type View = 'lecture' | 'library' | 'focus'
+type View = 'lecture' | 'library' | 'focus' | 'prep'
 
 export function App() {
   const {
@@ -207,6 +208,10 @@ export function App() {
     setView((v) => (v === 'focus' ? 'lecture' : 'focus'))
   }
 
+  function toggleTestPrep() {
+    setView((v) => (v === 'prep' ? 'lecture' : 'prep'))
+  }
+
   // Global 'F' shortcut: enter focus from lecture view when a PDF is open.
   // Esc-to-exit lives inside FocusView itself.
   useEffect(() => {
@@ -251,6 +256,7 @@ export function App() {
         libraryCount={libraryCount}
         onToggleLibrary={toggleLibrary}
         onToggleFocus={toggleFocus}
+        onToggleTestPrep={toggleTestPrep}
       />
 
       {quotaWarning ? (
@@ -281,7 +287,11 @@ export function App() {
             : undefined
         }
       >
-        {view === 'library' ? (
+        {view === 'prep' ? (
+          <div className="prep-host">
+            <TestPrepMode onExit={() => setView('lecture')} />
+          </div>
+        ) : view === 'library' ? (
           <div className="library-host">
             <LibraryView
               onOpen={handleOpenFromLibrary}

@@ -1,29 +1,8 @@
-// Import from the `/client` entry rather than the package root: the root
-// barrel pulls in the Node-only agent-toolset (node:crypto/fs), which breaks
-// the Vite browser build.
-import { Anthropic } from '@anthropic-ai/sdk/client'
-
-const apiKey = import.meta.env.VITE_ANTHROPIC_API_KEY?.trim()
-
-let client: Anthropic | null = null
-
-function getClient(): Anthropic {
-  if (!apiKey) {
-    throw new Error(
-      'No API key. Add VITE_ANTHROPIC_API_KEY to .env.local and restart the dev server.',
-    )
-  }
-  if (!client) {
-    // The key lives in the browser bundle — acceptable for local/personal use
-    // only. See .env.local for the security note.
-    client = new Anthropic({ apiKey, dangerouslyAllowBrowser: true })
-  }
-  return client
-}
+import { getAIClient, hasAnyApiKey, type AIMessage } from './aiClient'
 
 /** Whether a usable key is configured. Drives the "set your key" empty state. */
 export function hasApiKey(): boolean {
-  return Boolean(apiKey)
+  return hasAnyApiKey()
 }
 
 export interface AskContext {
@@ -74,8 +53,8 @@ const SYSTEM_PROMPT =
   'no extractable text, rely on the notes and the question.'
 
 /**
- * Streams an answer from Claude. Calls `onText` with each text delta and
- * resolves with the full answer string. Throws if the key is missing or the
+ * Streams an answer from the AI provider. Calls `onText` with each text delta
+ * and resolves with the full answer string. Throws if the key is missing or the
  * request fails.
  */
 export async function askClaude({
@@ -85,29 +64,23 @@ export async function askClaude({
   onText,
   signal,
 }: AskOptions): Promise<string> {
-  const anthropic = getClient()
+  const client = getAIClient()
 
-  const messages: ChatTurn[] = [
-    ...history,
-    { role: 'user', content: `${buildContextBlock(context)}\n\nQuestion: ${question}` },
+  const messages: AIMessage[] = [
+    ...history.map((t) => ({ role: t.role, content: t.content }) as AIMessage),
+    {
+      role: 'user',
+      content: `${buildContextBlock(context)}\n\nQuestion: ${question}`,
+    },
   ]
 
-  const stream = anthropic.messages.stream(
-    {
-      model: 'claude-sonnet-4-6',
-      max_tokens: 2048,
-      thinking: { type: 'adaptive' },
-      system: SYSTEM_PROMPT,
-      messages,
-    },
-    { signal },
-  )
-
-  stream.on('text', (delta) => onText(delta))
-
-  const final = await stream.finalMessage()
-  return final.content
-    .filter((block): block is Anthropic.TextBlock => block.type === 'text')
-    .map((block) => block.text)
-    .join('')
+  return client.complete({
+    system: SYSTEM_PROMPT,
+    messages,
+    maxTokens: 2048,
+    model: 'smart',
+    think: true,
+    onText,
+    signal,
+  })
 }
