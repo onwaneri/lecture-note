@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react'
 import { loadPDFFromBytes, type PDFDocumentProxy } from '../lib/pdf'
 import {
-  QuotaExceededWhileSavingPDF,
   ensureSession,
   getPDF,
   savePDF,
@@ -27,11 +26,9 @@ export interface UsePDFResult {
   pdf: LoadedPDF | null
   loading: boolean
   error: string | null
-  quotaWarning: boolean
   openFile: (file: File) => Promise<boolean>
   openFromLibrary: (filename: string) => Promise<boolean>
   close: () => void
-  dismissQuotaWarning: () => void
 }
 
 async function loadWithRetainedBytes(
@@ -49,7 +46,6 @@ export function usePDF(): UsePDFResult {
   const [pdf, setPdf] = useState<LoadedPDF | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const [quotaWarning, setQuotaWarning] = useState(false)
 
   async function finalizeLoad(
     doc: PDFDocumentProxy,
@@ -71,11 +67,9 @@ export function usePDF(): UsePDFResult {
       try {
         await savePDF(file.name, file)
       } catch (saveErr) {
-        if (saveErr instanceof QuotaExceededWhileSavingPDF) {
-          setQuotaWarning(true)
-        } else {
-          console.error('savePDF failed', saveErr)
-        }
+        // Upload to Cloud Storage failed (offline/permission). The deck is still
+        // open and cached locally; it'll need re-saving to sync later.
+        console.error('savePDF failed', saveErr)
       }
       return true
     } catch (e) {
@@ -94,7 +88,11 @@ export function usePDF(): UsePDFResult {
     try {
       const blob = await getPDF(filename)
       if (!blob) {
-        setError('Library entry missing PDF bytes.')
+        setError(
+          navigator.onLine
+            ? 'Library entry missing PDF bytes.'
+            : "You're offline and this deck isn't downloaded yet — reconnect to open it.",
+        )
         return false
       }
       const { doc, bytes } = await loadWithRetainedBytes(blob)
@@ -116,10 +114,6 @@ export function usePDF(): UsePDFResult {
     setPdf(null)
   }
 
-  function dismissQuotaWarning(): void {
-    setQuotaWarning(false)
-  }
-
   useEffect(() => {
     return () => {
       if (pdf) pdf.doc.destroy()
@@ -131,10 +125,8 @@ export function usePDF(): UsePDFResult {
     pdf,
     loading,
     error,
-    quotaWarning,
     openFile,
     openFromLibrary,
     close,
-    dismissQuotaWarning,
   }
 }

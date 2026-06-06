@@ -76,9 +76,6 @@ button:disabled {
 .header {
   flex: 0 0 56px;
 }
-.quota-banner {
-  flex: 0 0 auto;
-}
 .main {
   flex: 1 1 auto;
   min-height: 0;
@@ -678,30 +675,6 @@ button:disabled {
   float: left;
   height: 0;
   pointer-events: none;
-}
-
-/* ── Quota banner ───────────────────────────────────── */
-.quota-banner {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  padding: 10px 28px;
-  background: #fbf5d8;
-  color: var(--ate-ink);
-  border-bottom: 1px solid var(--ate-mark-2);
-  font-family: var(--font-ui);
-  font-size: 13px;
-}
-.quota-banner button {
-  border: 1px solid var(--ate-mark-2);
-  background: var(--ate-mark);
-  color: var(--ate-ink);
-  font-family: var(--font-mono);
-  font-size: 10px;
-  letter-spacing: 0.15em;
-  text-transform: uppercase;
-  padding: 5px 10px;
 }
 
 /* ── Export button ──────────────────────────────────── */

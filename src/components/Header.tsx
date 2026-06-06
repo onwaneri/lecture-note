@@ -1,5 +1,6 @@
 import type { ChangeEvent } from 'react'
 import { ExportButton } from './ExportButton'
+import { signOutUser } from './AuthGate'
 import type { PDFDocumentProxy } from '../lib/pdf'
 
 interface HeaderProps {
@@ -126,6 +127,14 @@ export function Header({
             hasAnyNotes={notes.size > 0}
           />
         ) : null}
+        <button
+          type="button"
+          onClick={() => void signOutUser()}
+          className="ate-btn"
+          title="Sign out"
+        >
+          Sign out
+        </button>
       </div>
     </header>
   )

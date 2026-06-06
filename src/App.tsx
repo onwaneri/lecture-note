@@ -29,16 +29,7 @@ import {
 type View = 'lecture' | 'library' | 'focus' | 'prep'
 
 export function App() {
-  const {
-    pdf,
-    loading,
-    error,
-    quotaWarning,
-    openFile,
-    openFromLibrary,
-    close,
-    dismissQuotaWarning,
-  } = usePDF()
+  const { pdf, loading, error, openFile, openFromLibrary, close } = usePDF()
   const [activeIndex, setActiveIndex] = useState(0)
   const [sessionName, setSessionName] = useState('')
   const [dragOver, setDragOver] = useState(false)
@@ -258,13 +249,6 @@ export function App() {
         onToggleFocus={toggleFocus}
         onToggleTestPrep={toggleTestPrep}
       />
-
-      {quotaWarning ? (
-        <div className="quota-banner">
-          Browser storage is full — this PDF wasn't saved to the library. Notes still save per-slide.
-          <button onClick={dismissQuotaWarning}>Dismiss</button>
-        </div>
-      ) : null}
 
       <input
         ref={fileInputRef}

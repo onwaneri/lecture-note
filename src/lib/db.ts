@@ -10,12 +10,14 @@ import {
   collection,
   deleteDoc,
   doc,
+  getCountFromServer,
   getDoc,
   getDocs,
   query,
   setDoc,
   where,
   writeBatch,
+  type DocumentReference,
 } from 'firebase/firestore'
 import {
   deleteObject,
@@ -272,12 +274,6 @@ export interface PDFRecord {
   storagePath: string
 }
 
-export interface ThumbnailRecord {
-  filename: string
-  dataURL: string
-  generatedAt: number
-}
-
 export interface LibraryEntry {
   filename: string
   sessionName: string
@@ -305,6 +301,20 @@ function dref(name: string, id: string) {
   return doc(getDb(), 'users', requireUid(), name, did(id))
 }
 
+/**
+ * Delete an arbitrary number of docs, chunked under Firestore's 500-op-per-batch
+ * limit (kept at 450 for headroom). A heavily-annotated deck can have hundreds of
+ * note + chat docs, which would overflow a single writeBatch.
+ */
+const BATCH_LIMIT = 450
+async function deleteRefsInChunks(refs: DocumentReference[]): Promise<void> {
+  for (let i = 0; i < refs.length; i += BATCH_LIMIT) {
+    const batch = writeBatch(getDb())
+    for (const ref of refs.slice(i, i + BATCH_LIMIT)) batch.delete(ref)
+    await batch.commit()
+  }
+}
+
 // --- Notes ------------------------------------------------------------------
 
 export function noteKey(filename: string, slideIndex: number): string {
@@ -322,6 +332,13 @@ export async function setNote(
   markdown: string,
 ): Promise<void> {
   const key = noteKey(filename, slideIndex)
+  // Don't persist empty notes — delete instead, mirroring setChat. This keeps
+  // every stored note doc non-empty, so countNotesForFile can use a cheap
+  // server-side count without an index or downloading bodies.
+  if (!markdown.trim()) {
+    await deleteDoc(dref('notes', key))
+    return
+  }
   await setDoc(dref('notes', key), {
     key,
     filename,
@@ -344,12 +361,17 @@ export async function getAllNotesForFile(
 }
 
 export async function countNotesForFile(filename: string): Promise<number> {
-  const snaps = await getDocs(query(col('notes'), where('filename', '==', filename)))
-  let count = 0
-  snaps.forEach((s) => {
-    if ((s.data() as NoteRecord).markdown.trim()) count++
-  })
-  return count
+  // Server-side aggregation — counts matching docs without downloading them.
+  // All stored notes are non-empty (see setNote), so a plain count is accurate.
+  const q = query(col('notes'), where('filename', '==', filename))
+  try {
+    const snap = await getCountFromServer(q)
+    return snap.data().count
+  } catch {
+    // Aggregation requires the server; offline, count from the local cache.
+    const snaps = await getDocs(q)
+    return snaps.size
+  }
 }
 
 // --- Chats ------------------------------------------------------------------
@@ -431,19 +453,19 @@ export async function deletePrepSession(sessionId: string): Promise<void> {
   const progressSnaps = await getDocs(
     query(col('prepProgress'), where('sessionId', '==', sessionId)),
   )
-  const batch = writeBatch(getDb())
-  progressSnaps.forEach((s) => batch.delete(s.ref))
-  batch.delete(dref('prepSessions', sessionId))
-  await batch.commit()
+  const refs: DocumentReference[] = []
+  progressSnaps.forEach((s) => refs.push(s.ref))
+  refs.push(dref('prepSessions', sessionId))
+  await deleteRefsInChunks(refs)
 }
 
 export async function resetSessionProgress(sessionId: string): Promise<void> {
   const snaps = await getDocs(
     query(col('prepProgress'), where('sessionId', '==', sessionId)),
   )
-  const batch = writeBatch(getDb())
-  snaps.forEach((s) => batch.delete(s.ref))
-  await batch.commit()
+  const refs: DocumentReference[] = []
+  snaps.forEach((s) => refs.push(s.ref))
+  await deleteRefsInChunks(refs)
 }
 
 export async function getAllProgressForSession(
@@ -535,13 +557,6 @@ export async function clearLastFilename(): Promise<void> {
 
 // --- PDFs (Cloud Storage + local cache) -------------------------------------
 
-export class QuotaExceededWhileSavingPDF extends Error {
-  constructor() {
-    super('Browser storage is full — PDF not saved to library.')
-    this.name = 'QuotaExceededWhileSavingPDF'
-  }
-}
-
 function pdfStoragePath(filename: string): string {
   return `users/${requireUid()}/pdfs/${encodeURIComponent(filename)}`
 }
@@ -597,12 +612,11 @@ export async function deleteLectureEntry(filename: string): Promise<void> {
     getDocs(query(col('notes'), where('filename', '==', filename))),
     getDocs(query(col('chats'), where('filename', '==', filename))),
   ])
-  const batch = writeBatch(getDb())
-  noteSnaps.forEach((s) => batch.delete(s.ref))
-  chatSnaps.forEach((s) => batch.delete(s.ref))
-  batch.delete(dref('sessions', filename))
-  batch.delete(dref('pdfMeta', filename))
-  await batch.commit()
+  const refs: DocumentReference[] = []
+  noteSnaps.forEach((s) => refs.push(s.ref))
+  chatSnaps.forEach((s) => refs.push(s.ref))
+  refs.push(dref('sessions', filename), dref('pdfMeta', filename))
+  await deleteRefsInChunks(refs)
 
   // Storage object + local caches.
   await deleteObject(pdfRef(filename)).catch(() => {
