@@ -34,6 +34,9 @@ export function App() {
   const [sessionName, setSessionName] = useState('')
   const [dragOver, setDragOver] = useState(false)
   const [view, setView] = useState<View>('lecture')
+  // The view to return to when leaving prep — set when prep is entered, so
+  // "Back to notes" lands back where you launched from (library vs lecture).
+  const [prepReturnView, setPrepReturnView] = useState<View>('lecture')
   const [libraryCount, setLibraryCount] = useState(0)
   const [bootChecked, setBootChecked] = useState(false)
   const [notesWidth, setNotesWidth] = useState<number | null>(null)
@@ -200,7 +203,13 @@ export function App() {
   }
 
   function toggleTestPrep() {
-    setView((v) => (v === 'prep' ? 'lecture' : 'prep'))
+    if (view === 'prep') {
+      setView(prepReturnView)
+      return
+    }
+    // Remember where we came from (library or lecture) so exiting prep returns here.
+    setPrepReturnView(view)
+    setView('prep')
   }
 
   // Global 'F' shortcut: enter focus from lecture view when a PDF is open.
@@ -232,23 +241,28 @@ export function App() {
 
   return (
     <div className="app" onDrop={onDrop} onDragOver={onDragOver} onDragLeave={onDragLeave}>
-      <Header
-        sessionName={sessionName}
-        filename={filename}
-        activeIndex={activeIndex}
-        numPages={numPages}
-        onSessionNameChange={setSessionName}
-        onOpenFile={handleOpenFile}
-        doc={pdf?.doc ?? null}
-        notes={notes}
-        exporting={exporting}
-        onExport={runExport}
-        view={view}
-        libraryCount={libraryCount}
-        onToggleLibrary={toggleLibrary}
-        onToggleFocus={toggleFocus}
-        onToggleTestPrep={toggleTestPrep}
-      />
+      {/* Prep mode is self-contained — it owns its own top bars and back/exit
+          navigation, so the lecture header is hidden to avoid a second "Exit
+          prep" control that would bypass the prep home and dump you on a slide. */}
+      {view !== 'prep' ? (
+        <Header
+          sessionName={sessionName}
+          filename={filename}
+          activeIndex={activeIndex}
+          numPages={numPages}
+          onSessionNameChange={setSessionName}
+          onOpenFile={handleOpenFile}
+          doc={pdf?.doc ?? null}
+          notes={notes}
+          exporting={exporting}
+          onExport={runExport}
+          view={view}
+          libraryCount={libraryCount}
+          onToggleLibrary={toggleLibrary}
+          onToggleFocus={toggleFocus}
+          onToggleTestPrep={toggleTestPrep}
+        />
+      ) : null}
 
       <input
         ref={fileInputRef}
@@ -273,7 +287,7 @@ export function App() {
       >
         {view === 'prep' ? (
           <div className="prep-host">
-            <TestPrepMode onExit={() => setView('lecture')} />
+            <TestPrepMode onExit={() => setView(prepReturnView)} />
           </div>
         ) : view === 'library' ? (
           <div className="library-host">

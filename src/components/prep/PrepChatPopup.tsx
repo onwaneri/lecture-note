@@ -7,6 +7,32 @@ function renderMarkdown(md: string): string {
   return marked.parse(md, { async: false }) as string
 }
 
+function clamp(v: number, min: number, max: number): number {
+  return Math.max(min, Math.min(max, v))
+}
+
+interface Box {
+  top: number
+  left: number
+  width: number
+  height: number
+}
+
+/** Default geometry scaled to the viewport, anchored bottom-right. */
+function defaultBox(): Box {
+  const width = Math.round(clamp(window.innerWidth * 0.3, 400, 640))
+  const height = Math.round(clamp(window.innerHeight * 0.72, 460, 920))
+  return {
+    width,
+    height,
+    left: Math.round(Math.max(16, window.innerWidth - width - 24)),
+    top: Math.round(Math.max(16, window.innerHeight - height - 24)),
+  }
+}
+
+const MIN_W = 340
+const MIN_H = 320
+
 export interface ChatMessage {
   role: 'user' | 'assistant'
   content: string
@@ -85,6 +111,82 @@ export function PrepChatPopup({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<HTMLTextAreaElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
+
+  // Floating-window geometry: default-sized to the viewport (so it's not tiny on
+  // big screens), then freely draggable (header) and resizable (corner handle).
+  const [box, setBox] = useState<Box>(() => defaultBox())
+  const boxRef = useRef(box)
+  boxRef.current = box
+
+  // Keep the window on-screen if the viewport shrinks.
+  useEffect(() => {
+    function onResize() {
+      setBox((b) => ({
+        ...b,
+        left: clamp(b.left, 0, Math.max(0, window.innerWidth - b.width)),
+        top: clamp(b.top, 0, Math.max(0, window.innerHeight - 48)),
+      }))
+    }
+    window.addEventListener('resize', onResize)
+    return () => window.removeEventListener('resize', onResize)
+  }, [])
+
+  // Drag to move — started from the header (ignores clicks on its buttons).
+  const startDrag = useCallback((e: React.PointerEvent) => {
+    if ((e.target as HTMLElement).closest('button')) return
+    e.preventDefault()
+    const orig = boxRef.current
+    const sx = e.clientX
+    const sy = e.clientY
+    function onMove(ev: PointerEvent) {
+      const left = clamp(orig.left + (ev.clientX - sx), 0, window.innerWidth - orig.width)
+      const top = clamp(orig.top + (ev.clientY - sy), 0, window.innerHeight - 48)
+      setBox({ ...orig, left, top })
+    }
+    function onUp() {
+      window.removeEventListener('pointermove', onMove)
+      window.removeEventListener('pointerup', onUp)
+    }
+    window.addEventListener('pointermove', onMove)
+    window.addEventListener('pointerup', onUp)
+  }, [])
+
+  // Resize from an edge ('x' = width, 'y' = height) or the corner ('both').
+  const startResize = useCallback(
+    (e: React.PointerEvent, axis: 'x' | 'y' | 'both') => {
+      e.preventDefault()
+      e.stopPropagation()
+      const orig = boxRef.current
+      const sx = e.clientX
+      const sy = e.clientY
+      function onMove(ev: PointerEvent) {
+        const width =
+          axis === 'y'
+            ? orig.width
+            : clamp(
+                orig.width + (ev.clientX - sx),
+                MIN_W,
+                window.innerWidth - orig.left - 8,
+              )
+        const height =
+          axis === 'x'
+            ? orig.height
+            : clamp(
+                orig.height + (ev.clientY - sy),
+                MIN_H,
+                window.innerHeight - orig.top - 8,
+              )
+        setBox({ ...orig, width, height })
+      }
+      function onUp() {
+        window.removeEventListener('pointermove', onMove)
+        window.removeEventListener('pointerup', onUp)
+      }
+      window.addEventListener('pointermove', onMove)
+      window.addEventListener('pointerup', onUp)
+    },
+    [],
+  )
 
   // Auto-scroll to bottom when messages change or while streaming.
   useEffect(() => {
@@ -173,9 +275,20 @@ export function PrepChatPopup({
   if (!open) return null
 
   return (
-    <div className="prep-chat-popup">
-      <div className="prep-chat-header">
-        <span className="prep-chat-header-title">Ask AI</span>
+    <div
+      className="prep-chat-popup"
+      style={{
+        top: box.top,
+        left: box.left,
+        width: box.width,
+        height: box.height,
+        right: 'auto',
+        bottom: 'auto',
+        maxHeight: 'none',
+      }}
+    >
+      <div className="prep-chat-header" onPointerDown={startDrag}>
+        <span className="prep-chat-header-title">Ask Doug</span>
         <span className="prep-chat-header-topic">{context.topicTitle}</span>
         <button
           type="button"
@@ -204,7 +317,7 @@ export function PrepChatPopup({
             className={`prep-chat-msg prep-chat-msg-${msg.role}`}
           >
             <div className="prep-chat-msg-label">
-              {msg.role === 'user' ? 'You' : 'AI'}
+              {msg.role === 'user' ? 'You' : 'Doug'}
             </div>
             {msg.role === 'assistant' ? (
               <div
@@ -221,7 +334,7 @@ export function PrepChatPopup({
 
         {streaming && streamText ? (
           <div className="prep-chat-msg prep-chat-msg-assistant">
-            <div className="prep-chat-msg-label">AI</div>
+            <div className="prep-chat-msg-label">Doug</div>
             <div
               className="prep-chat-msg-body ask-md"
               dangerouslySetInnerHTML={{
@@ -231,7 +344,7 @@ export function PrepChatPopup({
           </div>
         ) : streaming ? (
           <div className="prep-chat-msg prep-chat-msg-assistant">
-            <div className="prep-chat-msg-label">AI</div>
+            <div className="prep-chat-msg-label">Doug</div>
             <div className="prep-chat-msg-body prep-chat-thinking">
               <span className="prep-spinner small" aria-hidden="true" />
               Thinking…
@@ -263,6 +376,22 @@ export function PrepChatPopup({
           ↑
         </button>
       </div>
+
+      <div
+        className="prep-chat-resize-e"
+        onPointerDown={(e) => startResize(e, 'x')}
+        title="Drag to resize width"
+      />
+      <div
+        className="prep-chat-resize-s"
+        onPointerDown={(e) => startResize(e, 'y')}
+        title="Drag to resize height"
+      />
+      <div
+        className="prep-chat-resize-se"
+        onPointerDown={(e) => startResize(e, 'both')}
+        title="Drag to resize"
+      />
     </div>
   )
 }

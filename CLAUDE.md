@@ -1,6 +1,14 @@
 # LectureNote
 
-Local-first React app for per-slide markdown notes on lecture PDFs, plus an AI-powered test prep mode. No backend — all data lives in IndexedDB.
+Offline-first React app for per-slide markdown notes on lecture PDFs, plus an AI-powered test prep mode. Backed by **Firebase** (Auth + Firestore + Cloud Storage) with a local IndexedDB cache for instant/offline access. The in-app AI assistant is branded **"Doug."**
+
+> ## ⚠️ Keep this spec current
+> **This file is the source of truth for the app's architecture.** Update `CLAUDE.md` in the *same change* whenever you:
+> - add or remove a feature, screen, or major component;
+> - change the data model, persistence layer, or a key type;
+> - change a documented behavior, flow, or constraint.
+>
+> A change that alters how the app works but leaves this file stale is incomplete. When in doubt, update it.
 
 ## Stack
 
@@ -8,40 +16,51 @@ Local-first React app for per-slide markdown notes on lecture PDFs, plus an AI-p
 - **PDF viewing:** `pdfjs-dist` 4.7.76 (worker at `pdfjs-dist/build/pdf.worker.min.mjs?url`)
 - **PDF export:** `pdf-lib` ^1.17.1 — copies slide pages verbatim (preserves text layer), adds real-text notes pages
 - **Rich text editor:** TipTap (StarterKit + Placeholder + `tiptap-markdown`)
-- **AI:** `@anthropic-ai/sdk` (imported from `@anthropic-ai/sdk/client` to avoid Node-only agent-toolset); API key via `VITE_ANTHROPIC_API_KEY` in `.env.local`
-- **Persistence:** IndexedDB via `idb`; DB version 5, stores: `notes`, `sessions`, `pdfs`, `thumbnails`, `meta`, `prepSessions`, `prepTopicProgress`
+- **AI:** provider abstraction in `lib/aiClient.ts` — Anthropic (`@anthropic-ai/sdk`, browser-safe `/client` import) or Gemini, selected by `VITE_AI_PROVIDER` (`anthropic` | `gemini`, default `gemini`). Keys via `VITE_ANTHROPIC_API_KEY` / `VITE_GEMINI_API_KEY` in `.env.local`. The assistant is surfaced to users as **"Doug"** (internal symbols still say `askClaude`/`AskClaude`).
+- **Auth:** Firebase Authentication — Google + Email/Password. `AuthGate` wraps the app so every data call runs under a known `uid`.
+- **Persistence:** Firebase. **Firestore** for records (notes, chats, sessions, prep) under `users/{uid}/…` with `persistentLocalCache` (offline + sync); **Cloud Storage** for PDF bytes (`users/{uid}/pdfs/{filename}`); a local **IndexedDB cache** (`lib/pdfCache.ts`, db `lecturenote-cache`) holds PDF bytes + thumbnails for instant/offline access. `lib/db.ts` exposes the same public API as the old IndexedDB layer — call sites are unchanged.
 - **Styling:** Single CSS file (`src/styles/globals.css`) + design tokens in `src/styles/theme.css`
+- **Config (gitignored / infra):** `.env.local` (`VITE_FIREBASE_*` web config), `firestore.rules` + `storage.rules` (per-user `request.auth.uid == userId`), `firebase.json`, `.firebaserc`, `cors.json` (Storage CORS for cross-device PDF downloads, applied via `gsutil cors set`).
 
 ## Key files
 
 ```
 src/
-  App.tsx                         # Root — view state (lecture | library | focus | prep), PDF open/close
+  main.tsx                        # Mounts <AuthGate><App/></AuthGate>
+  App.tsx                         # Root — view state (lecture | library | focus | prep); hides Header in prep; remembers prepReturnView
   components/
+    AuthGate.tsx                  # Firebase sign-in gate (Google + email/password); exports signOutUser
     SlideViewer.tsx               # PDF stage + SlideThumbStrip; JS-computed frame sizing via ResizeObserver
     SlideThumbStrip.tsx           # Lazy thumbnail carousel (IntersectionObserver, in-memory cache)
     FocusView.tsx                 # Full-screen focus mode — TipTap editor + slide thumbnail rail
     NotesPanel.tsx                # Right-panel markdown editor (TipTap)
-    Header.tsx                    # 3-col grid; session name, nav controls, export + test-prep buttons
-    LibraryView.tsx               # Card grid with real page-1 thumbnails from IDB
+    AskClaude.tsx                 # Lecture-mode "Ask Doug" Q&A panel (inline/floating)
+    Header.tsx                    # 3-col grid; session name, nav controls, export + test-prep + sign-out (hidden in prep)
+    LibraryView.tsx               # Card grid with real page-1 thumbnails
     prep/
-      TestPrepMode.tsx            # Phase orchestrator: home | setup | processing | study
+      TestPrepMode.tsx            # Phase orchestrator: home | setup | processing | study; home is the prep hub
       PrepSetup.tsx               # Material picker + roles + difficulty selector
       PrepProcessing.tsx          # PDF ingestion + Tier 1 curriculum init, progress UI
-      PrepStudy.tsx               # Split-pane study view; session-level interleaving + retry queue
+      PrepStudy.tsx               # Split-pane study view; session-level interleaving + retry queue; back → "← All preps"
       CurriculumMap.tsx           # Topic list w/ progress bars + KC chips
       TopicSession.tsx            # Learn/practice tabs; open-ended + MC question UI
-      PrepChatPopup.tsx           # Floating chat popup (session-scoped, context-aware)
-      ReferencePane.tsx           # Collapsible multi-doc slide viewer + auto-surface
+      PrepChatPopup.tsx           # Floating "Ask Doug" chat — viewport-sized, draggable header, edge/corner resize
+      ReferencePane.tsx           # Multi-doc slide viewer + auto-surface + bidirectional per-slide notes/chat peek
   hooks/
     usePDF.ts                     # Loads PDF, retains bytes (pdf-lib needs them); LoadedPDF = { doc, bytes, ... }
-    useNotes.ts                   # Per-slide notes CRUD backed by IDB
+    useNotes.ts                   # Per-slide notes CRUD (via db.ts → Firestore)
+    useChats.ts                   # Per-slide Ask-Doug chat persistence (via db.ts → Firestore)
     useExport.ts                  # Wraps exportInterleavedPDF; exporting progress state
     usePrepDocs.ts                # Lazy multi-PDF loader for the reference pane (caches PDFDocumentProxy instances)
   lib/
-    db.ts                         # IDB schema (v5), all types, CRUD helpers, mastery configs
+    firebase.ts                   # Firebase app/auth/Firestore(persistentLocalCache, ignoreUndefinedProperties)/Storage singletons; requireUid()
+    db.ts                         # Firestore + Storage CRUD + all types/mastery configs (stable public API)
+    pdfCache.ts                   # Local IndexedDB cache for PDF bytes + thumbnails (offline/instant)
     pdf.ts                        # pdf.js helpers: loadPDFFromBytes, renderPageToCanvas
-    askClaude.ts                  # Anthropic SDK client singleton (browser-safe import)
+    aiClient.ts                   # AI provider abstraction (getAIClient → complete()); picks provider by VITE_AI_PROVIDER
+    aiProviderAnthropic.ts        # Anthropic provider (claude-* models)
+    aiProviderGemini.ts           # Gemini provider
+    askClaude.ts                  # Lecture-mode Q&A call ("Ask Doug")
     testPrep.ts                   # Tier 1/2/3 AI orchestration: curriculum init, overview, questions, grading
     questionSelector.ts           # Adaptive question selection: interleaving, retry, review, KC targeting
     exportPDFv2.ts                # Main export pipeline (sourceBytes → interleaved PDF)
@@ -53,6 +72,7 @@ src/
   styles/
     theme.css                     # Atelier design tokens (--ate-bg, --ate-ink, --ate-accent, etc.)
     globals.css                   # All component CSS
+firestore.rules, storage.rules, firebase.json, .firebaserc, cors.json   # Firebase infra config
 ```
 
 ## Design system (Atelier)
@@ -75,24 +95,32 @@ npx tsc -b         # type-check only
 
 ## Architecture notes
 
-- **No server.** Vercel just serves static files; all user data (PDFs, notes) lives in the visitor's own browser IDB.
+- **Firebase, offline-first.** Vercel serves static files; user data lives in Firebase, namespaced per user. Firestore's `persistentLocalCache` serves reads/writes offline and syncs; PDFs sync via Cloud Storage with a local IndexedDB byte cache so an already-opened deck renders instantly and works offline.
+- **Auth gates everything.** `AuthGate` (in `main.tsx`) renders the app only once a user is signed in, so every `db.ts` call has a `uid` (`requireUid()` throws otherwise). Google + email/password are separate Firebase users with separate data.
+- **`db.ts` keeps a stable API.** All persistence funnels through its exported functions; internals are Firestore + Storage + `pdfCache`. Doc IDs are `encodeURIComponent`-sanitized (`::` keys → safe ids). `setNote` deletes empty notes (so `countNotesForFile` can use a server-side `getCountFromServer`, with a cached `getDocs` fallback offline). Bulk deletes are chunked under Firestore's 500-op batch limit. Firestore is configured with `ignoreUndefinedProperties` so optional record fields serialize cleanly.
+- **PDF hybrid:** `savePDF` writes the local cache + uploads to Storage + writes a `pdfMeta` doc; `getPDF` returns the cached blob or downloads from Storage (then caches). Cross-device download needs the bucket CORS from `cors.json`.
 - **pdf.js detaches its input buffer** on transfer to worker — always pass a defensive copy: `loadPDFFromBytes(new Uint8Array(bytes))`.
 - **Frame sizing** is computed in JS (not CSS) to maintain slide aspect ratio within the available stage area. `STAGE_PADDING = 28px`.
-- **Export bytes** — `LoadedPDF.bytes` retains the original Uint8Array so pdf-lib can copy pages verbatim without re-fetching from IDB.
-- **SlideThumbStrip** uses `IntersectionObserver` with `rootMargin: '0px 240px 0px 240px'` for pre-loading tiles just off-screen. Thumbnails are kept in component state (not IDB) — they're cheap to regenerate.
+- **Export bytes** — `LoadedPDF.bytes` retains the original Uint8Array so pdf-lib can copy pages verbatim without re-fetching.
+- **SlideThumbStrip** uses `IntersectionObserver` with `rootMargin: '0px 240px 0px 240px'` for pre-loading tiles just off-screen. Thumbnails are kept in component state — cheap to regenerate.
 - **FocusView** hides the thumb strip; slide navigation is via arrow keys only when focus is outside the TipTap editor.
+- **Prep navigation.** Prep is a self-contained area: the lecture Header is hidden while `view === 'prep'`, so there's no second "Exit prep" that bypasses the hierarchy. Entry records `prepReturnView` (library vs lecture) so "Back to notes" returns to the origin. Inside study, back goes topic → "← Curriculum" → "← All preps" (the prep home), never out to a slide.
 
-## IDB schema (db.ts, DB_VERSION = 5)
+## Firestore + Storage data model (per user, `users/{uid}/…`)
 
-| Store | Key | Value |
+`db.ts` returns `::`-joined keys (e.g. `noteKey = filename::slideIndex`); doc IDs sanitize them via `encodeURIComponent`. Queries use single-field `where` filters (no composite indexes needed).
+
+| Collection / path | Doc id | Value |
 |---|---|---|
-| `notes` | `filename_slideIndex` | `{ filename, slideIndex, markdown, updatedAt }` |
-| `sessions` | `filename` | `{ filename, sessionName, activeSlideIndex, updatedAt }` |
-| `pdfs` | `filename` | `{ filename, blob, byteSize, addedAt }` |
-| `thumbnails` | `filename` | `{ filename, dataURL, generatedAt }` |
-| `meta` | `'lastFilename'` | string |
+| `notes` | `filename::slideIndex` | `{ key, filename, slideIndex, markdown, updatedAt }` (empties deleted) |
+| `chats` | `filename::slideIndex` | `{ key, filename, slideIndex, turns[], updatedAt }` |
+| `sessions` | `filename` | `{ filename, sessionName, lastOpenedAt, activeSlideIndex?, numPages? }` |
+| `pdfMeta` | `filename` | `{ filename, byteSize, addedAt, storagePath }` (bytes live in Storage) |
+| `meta` | `lastFilename` | `{ key, value }` |
 | `prepSessions` | `sessionId` | `PrepSessionRecord` (difficulty, status, blueprint, documents) |
-| `prepTopicProgress` | `${sessionId}::${topicId}` | `PrepTopicProgressRecord` (status, turns, kcMastery, overview); index `by-session` |
+| `prepProgress` | `sessionId::topicId` | `PrepTopicProgressRecord` (status, turns, kcMastery, overview) |
+| **Cloud Storage** | `users/{uid}/pdfs/{filename}` | raw PDF blob |
+| **Local cache only** (`pdfCache`, not synced) | `filename` | PDF blob + thumbnail dataURL |
 
 ---
 
@@ -111,7 +139,7 @@ An isolated, AI-driven study mode. Students gather lecture PDFs → a curriculum
 
 ### Three-tier context strategy
 
-- **Tier 1 — Initialization** (`initializeCurriculum` in `testPrep.ts`): each PDF sent as a native document block (base64) to Anthropic — no client-side text extraction.
+- **Tier 1 — Initialization** (`initializeCurriculum` in `testPrep.ts`): each PDF sent as a native document block (base64) to the AI provider (via `aiClient`) — no client-side text extraction.
   - **1 file** → single direct curriculum call.
   - **N files** → per-file concept summaries in parallel (map) then one text-only synthesis (reduce). Wall-clock ≈ slowest single file.
   - **Slide-index fidelity**: per-file calls attribute concepts to real 0-based slide indices; validated against actual page counts, hallucinated refs dropped.
@@ -122,11 +150,13 @@ An isolated, AI-driven study mode. Students gather lecture PDFs → a curriculum
 
 ### Models
 
-- **Tier 1 map** (per-file summaries / exam analysis): `claude-haiku-4-5`, thinking off — fast, parallel extraction.
-- **Tier 1 topic picker** (single-file / synthesis): `claude-sonnet-4-6` with adaptive thinking — reasoning quality matters for topic selection/sequencing.
-- **Tier 2** (overview / question generation / grading): `claude-sonnet-4-6` with adaptive thinking.
+Calls go through `aiClient` with a model **tier** (`'fast'` | `'smart'`); each provider maps the tier to a concrete model (Anthropic mapping shown):
 
-All calls stream via `finalMessage()`. Responses are strict JSON, parsed tolerantly (fence/brace stripping). Scores snap to nearest legal quarter. Hallucinated slide references dropped.
+- **Tier 1 map** (per-file summaries / exam analysis): `'fast'` → `claude-haiku-4-5`, thinking off — fast, parallel extraction.
+- **Tier 1 topic picker** (single-file / synthesis): `'smart'` → `claude-sonnet-4-6` with adaptive thinking — reasoning quality matters for topic selection/sequencing.
+- **Tier 2** (overview / question generation / grading): `'smart'` with adaptive thinking.
+
+All calls stream via the provider's streaming API (`aiClient.complete({ onText })`). Responses are strict JSON, parsed tolerantly (fence/brace stripping). Scores snap to nearest legal quarter. Hallucinated slide references dropped.
 
 ### Difficulty modes
 
@@ -183,8 +213,8 @@ Both formats carry `kcId`, `difficultyLevel`, and `format` on the `PrepTurn` rec
 - **PrepStudy** — split-pane: left = curriculum map or topic session, right = resizable/collapsible reference pane. Manages session-level state: retry queue, recent topic IDs, turn count (in-memory refs, not persisted). Calls `selectNextQuestion()` and `onAnswerGraded()` to drive adaptive behavior. Shows topic-switch banner when interleaving causes a topic change. **Owns overview generation**: a background prefetch (`ensureOverview`) generates+persists each topic's cited overview once progress loads — sequentially, with the just-opened topic jumped to the front — so overviews are ready before entry and saved immediately (survives navigating away mid-generation). `TopicSession` consumes them via `overview`/`overviewLoading`/`overviewError`/`onRetryOverview` props.
 - **CurriculumMap** — topic cards with progress bars, KC chips (filled/unfilled with labels), status line showing `pts/threshold` and `KCs covered/total`.
 - **TopicSession** — two tabs: **Overview** (teaching primer with cited sections + citation chips that surface slides in the reference pane; generated/cached by PrepStudy and received via props — pure consumer) and **Practice** (one question at a time). Accepts `targetDifficulty`, `targetKcId`, `targetKcLabel` from the session-level selector. Renders either a textarea (open-ended) or `MultipleChoice` component based on question format. **Question prefetch**: the next question is generated in the background while the student works the current one, so "Next" promotes it instantly; each fetch excludes prior + current question text so every Next is a distinct question (never the same one). Provides chat trigger buttons: "Ask about this topic" on the overview tab (when overview is loaded), "Ask about this" on the practice tab (after answer submission only).
-- **PrepChatPopup** — floating intercom-style chat window (fixed bottom-right, z-index 1000). Session-scoped history (persists across all topics/questions). Streams responses from `claude-sonnet-4-6`. Context includes current topic, overview, and (after submission) the question, student answer, score, and feedback. Opened via trigger buttons in TopicSession, closed via ✕ button.
-- **ReferencePane** — vertical scroll carousel of source slides (lazily rasterised via IntersectionObserver with 600px preload margin). `<select>` switches between sources. Resizable (drag divider), collapsible. Nudge banner on AI-suggested slides; smooth-scroll + brief highlight.
+- **PrepChatPopup ("Ask Doug")** — floating chat window. **Default size scales to the viewport** (~30% w / ~72% h, clamped), **draggable by its header**, and **resizable** from the right edge (width), bottom edge (height), or corner (both); geometry persists across close/reopen (in-component state, re-clamped on viewport resize). Session-scoped history persists across all topics/questions. Streams from the configured AI provider (`model: 'smart'`). Context includes current topic, overview, and (after submission) the question, answer, score, and feedback. Opened via TopicSession trigger buttons.
+- **ReferencePane** — vertical scroll carousel of source slides (lazily rasterised via IntersectionObserver with 600px preload margin). `<select>` switches sources. Resizable (drag divider), collapsible. Nudge banner on AI-suggested slides; smooth-scroll + brief highlight. **Bidirectional notes peek:** every slide shows a ✎ badge (solid when it has lecture-mode notes/chat, faded "+" to add); a bottom-sheet renders the slide's note markdown + Ask-Doug chat history and lets you **edit/add notes that autosave back to the lecture note store** (`setNote`, same `filename::slideIndex` key). Surfacing a slide (Tier-3 / citation) auto-opens the sheet only if that slide has content. Notes loaded per active document via `getAllNotesForFile`/`getAllChatsForFile`; empty for prep-only uploads.
 
 ### Constraints / guardrails
 

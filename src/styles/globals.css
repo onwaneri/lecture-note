@@ -1245,7 +1245,7 @@ button:disabled {
   display: none;
 }
 
-/* ===== Ask Claude (Q&A) ============================================== */
+/* ===== Ask Doug (Q&A) ============================================== */
 
 .ask-claude {
   position: relative;
@@ -2140,16 +2140,15 @@ button:disabled {
 /* Topic session (Q&A) */
 .prep-topic-session {
   overflow-y: auto;
-  padding: 24px 28px 60px;
-  max-width: 760px;
+  padding: 16px 28px 60px;
 }
 .prep-ts-head {
-  margin-bottom: 20px;
+  margin-bottom: 12px;
 }
 .prep-ts-title {
   font-family: var(--font-display);
-  font-size: 24px;
-  margin: 0 0 12px;
+  font-size: 21px;
+  margin: 0 0 8px;
   color: var(--ate-ink);
 }
 .prep-ts-mastery {
@@ -2435,7 +2434,7 @@ button:disabled {
 .prep-ts-tabs {
   display: inline-flex;
   gap: 4px;
-  margin-top: 14px;
+  margin-top: 10px;
   background: var(--ate-bg-2);
   border-radius: var(--radius-pill);
   padding: 3px;
@@ -2810,6 +2809,40 @@ button:disabled {
   border-bottom: 1px solid var(--ate-rule);
   background: var(--ate-bg);
   flex: 0 0 auto;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+/* Resize handles for the floating chat window. Right edge = width, bottom edge
+   = height, corner = both. */
+.prep-chat-resize-e,
+.prep-chat-resize-s,
+.prep-chat-resize-se {
+  position: absolute;
+  touch-action: none;
+  z-index: 3;
+}
+.prep-chat-resize-e {
+  top: 0;
+  right: 0;
+  width: 6px;
+  height: 100%;
+  cursor: ew-resize;
+}
+.prep-chat-resize-s {
+  left: 0;
+  bottom: 0;
+  height: 6px;
+  width: 100%;
+  cursor: ns-resize;
+}
+.prep-chat-resize-se {
+  right: 0;
+  bottom: 0;
+  width: 18px;
+  height: 18px;
+  cursor: nwse-resize;
+  z-index: 4;
 }
 .prep-chat-header-title {
   font-family: var(--font-ui);
@@ -3077,4 +3110,198 @@ button:disabled {
 }
 .auth-toggle:hover {
   text-decoration: underline;
+}
+
+/* ── Reference pane: personal notes peek ────────────── */
+.prep-ref-slide {
+  position: relative;
+}
+.prep-ref-canvas {
+  width: 100%;
+  display: block;
+  scroll-margin-top: 12px;
+}
+.prep-ref-note-badge {
+  position: absolute;
+  bottom: 6px;
+  right: 6px;
+  width: 26px;
+  height: 26px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ate-rule);
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--ate-mark) 85%, white);
+  color: var(--ate-ink);
+  font-size: 13px;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  transition: transform 0.12s ease, background 0.12s ease;
+}
+.prep-ref-note-badge:hover {
+  transform: scale(1.08);
+}
+.prep-ref-note-badge.active {
+  background: var(--ate-accent);
+  color: #fff;
+  border-color: var(--ate-accent);
+}
+.prep-ref-note-dot {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--ate-accent);
+  border: 1.5px solid var(--ate-surface);
+}
+.prep-ref-note-badge.active .prep-ref-note-dot {
+  background: #fff;
+}
+
+/* Bottom sheet showing the peeked slide's note + chat. */
+.prep-ref-note {
+  flex: 0 0 auto;
+  max-height: 45%;
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--ate-rule);
+  background: var(--ate-surface);
+}
+.prep-ref-note-head {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ate-ink);
+  border-bottom: 1px solid var(--ate-rule);
+}
+.prep-ref-note-close {
+  border: none;
+  background: none;
+  cursor: pointer;
+  color: var(--ate-muted);
+  font-size: 13px;
+  line-height: 1;
+  padding: 2px 4px;
+}
+.prep-ref-note-close:hover {
+  color: var(--ate-ink);
+}
+.prep-ref-note-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 12px;
+  font-family: var(--font-ui);
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--ate-ink);
+}
+.prep-ref-note-md > :first-child {
+  margin-top: 0;
+}
+.prep-ref-note-md > :last-child {
+  margin-bottom: 0;
+}
+.prep-ref-chat {
+  margin-top: 14px;
+  border-top: 1px dashed var(--ate-rule);
+  padding-top: 10px;
+}
+.prep-ref-chat-label {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--ate-muted);
+  margin-bottom: 8px;
+}
+.prep-ref-chat-turn {
+  border-radius: var(--radius-sm);
+  padding: 7px 10px;
+  margin-bottom: 6px;
+  font-size: 12.5px;
+}
+.prep-ref-chat-turn.user {
+  background: color-mix(in srgb, var(--ate-accent) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--ate-accent) 20%, transparent);
+}
+.prep-ref-chat-turn.assistant {
+  background: var(--ate-bg);
+  border: 1px solid var(--ate-rule);
+}
+.prep-ref-chat-md > :first-child {
+  margin-top: 0;
+}
+.prep-ref-chat-md > :last-child {
+  margin-bottom: 0;
+}
+
+/* Add-a-note badge (slides without notes) — subtle until hover. */
+.prep-ref-note-badge.add {
+  background: color-mix(in srgb, var(--ate-surface) 78%, transparent);
+  color: var(--ate-muted);
+  border-style: dashed;
+  opacity: 0;
+}
+.prep-ref-slide:hover .prep-ref-note-badge.add,
+.prep-ref-note-badge.add.active {
+  opacity: 1;
+}
+.prep-ref-note-badge.add:hover {
+  color: var(--ate-ink);
+}
+
+/* Note sheet: edit affordances. */
+.prep-ref-note-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.prep-ref-note-edit-toggle {
+  border: 1px solid var(--ate-rule);
+  background: var(--ate-surface);
+  color: var(--ate-ink);
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.prep-ref-note-edit-toggle:hover {
+  border-color: var(--ate-accent);
+}
+.prep-ref-note-edit-toggle.active {
+  background: var(--ate-accent);
+  color: #fff;
+  border-color: var(--ate-accent);
+}
+.prep-ref-note-edit {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  border: 1px solid var(--ate-rule);
+  border-radius: var(--radius-sm);
+  background: var(--ate-bg);
+  color: var(--ate-ink);
+  padding: 10px;
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  line-height: 1.55;
+}
+.prep-ref-note-edit:focus {
+  outline: none;
+  border-color: var(--ate-accent);
+}
+.prep-ref-note-placeholder {
+  color: var(--ate-muted);
+  font-size: 12.5px;
+  font-style: italic;
 }

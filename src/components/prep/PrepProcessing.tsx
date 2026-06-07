@@ -74,7 +74,7 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
         }
 
         // 2. Read raw bytes + page count for every document. The PDFs are sent
-        //    to Claude as native document blocks (server-side parse) — no slow
+        //    to Doug as native document blocks (server-side parse) — no slow
         //    client-side per-page text extraction.
         const docs: PrepDocInput[] = []
         for (let i = 0; i < setup.picks.length; i++) {
@@ -199,7 +199,7 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
             </div>
             <div className="prep-processing-note">
               This one-time pass reads all {setup.picks.length} file
-              {setup.picks.length === 1 ? '' : 's'} via Claude. Open the browser
+              {setup.picks.length === 1 ? '' : 's'} via Doug. Open the browser
               console to watch each request ({'['}prep{']'} logs). Each call
               times out after 120s.
             </div>

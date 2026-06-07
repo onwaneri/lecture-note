@@ -270,7 +270,7 @@ export function PrepSetup({ onCancel, onStart }: PrepSetupProps) {
 
       <div className="prep-context-wrap">
         <label className="prep-setup-h prep-context-label" htmlFor="prep-user-context">
-          4 · Anything Claude should know?
+          4 · Anything Doug should know?
         </label>
         <textarea
           id="prep-user-context"

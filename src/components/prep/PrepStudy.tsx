@@ -383,7 +383,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
               selectedTopic ? setSelectedTopicId(null) : onExit()
             }
           >
-            {selectedTopic ? '← Curriculum' : '← Exit prep'}
+            {selectedTopic ? '← Curriculum' : '← All preps'}
           </button>
           <span className="prep-study-title">{session.title}</span>
           {refCollapsed ? (

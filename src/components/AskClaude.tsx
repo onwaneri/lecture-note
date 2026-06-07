@@ -220,7 +220,7 @@ export function AskClaude({
       >
         <span className="ask-title">
           <span className="ask-dot" aria-hidden="true" />
-          Ask Claude
+          Ask Doug
         </span>
         {showHeaderToggle ? (
           <span className="ask-chevron" aria-hidden="true">
@@ -243,7 +243,7 @@ export function AskClaude({
                   {turns.map((t, i) => (
                     <div key={i} className={`ask-turn ask-turn-${t.role}`}>
                       <div className="ask-turn-role">
-                        {t.role === 'user' ? 'You' : 'Claude'}
+                        {t.role === 'user' ? 'You' : 'Doug'}
                       </div>
                       <div className="ask-turn-content">
                         {t.role === 'assistant' ? (
