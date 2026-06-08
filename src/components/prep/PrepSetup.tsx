@@ -8,6 +8,7 @@ import {
   type PrepDocRole,
 } from '../../lib/db'
 import { prettifyFilename } from '../../lib/filenameUtils'
+import { PrepHeader } from './PrepHeader'
 
 export interface PrepPick {
   id: string
@@ -136,57 +137,84 @@ export function PrepSetup({ onCancel, onStart }: PrepSetupProps) {
     })
   }
 
+  const buildBtn = (
+    <button
+      type="button"
+      className="ate-btn ate-btn-primary"
+      onClick={start}
+      disabled={picks.length === 0}
+    >
+      Build curriculum →
+    </button>
+  )
+
   return (
-    <div className="prep-setup">
-      <div className="prep-setup-head">
-        <div className="prep-eyebrow">New prep session</div>
+    <div className="prep-screen">
+      <PrepHeader
+        center={<div className="prep-eyebrow acc">New prep session</div>}
+        right={
+          <>
+            <button type="button" className="ate-btn" onClick={onCancel}>
+              Cancel
+            </button>
+            {buildBtn}
+          </>
+        }
+      />
+
+      <div className="prep-setup-namebar">
         <input
-          className="session-input prep-title-input"
-          placeholder="Auto-named from content · or enter a title"
+          className="prep-name-input"
+          placeholder="Session title — leave blank to auto-name after build"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
         />
-        <div className="prep-title-hint">Leave blank to auto-name after build.</div>
       </div>
 
-      <div className="prep-setup-body">
-        <section className="prep-setup-col">
-          <h3 className="prep-setup-h">1 · Gather materials</h3>
-          <p className="prep-setup-hint">
-            Pick from your library or upload new files. Mark practice exams (we
-            never reuse their questions) and topic sheets if your professor gave
-            one out — we use those to align the curriculum to what's actually
-            on the exam. Up to {MAX_PREP_FILES} files.
-          </p>
+      <div className="prep-setup-cols">
+        {/* 01 · Gather materials */}
+        <div className="prep-setup-col">
+          <div className="prep-col-head">
+            <span className="prep-col-num">01</span>
+            <span className="prep-col-title">Gather materials</span>
+            <span className="prep-chip">
+              {picks.length} / {MAX_PREP_FILES}
+            </span>
+          </div>
+          <div className="prep-col-body">
+            <p className="prep-setup-hint">
+              Pick from your library or upload new files. Mark practice exams (we
+              never reuse their questions) and topic sheets so Doug can align the
+              curriculum to what's actually on the exam. Up to {MAX_PREP_FILES}{' '}
+              files.
+            </p>
 
-          <div className="prep-source-group">
             <div className="prep-source-label">From library</div>
             {library.length === 0 ? (
               <div className="prep-setup-empty">No saved lectures yet.</div>
             ) : (
-              <div className="prep-lib-list">
-                {library.map((e) => (
-                  <button
-                    key={e.filename}
-                    type="button"
-                    className={`prep-lib-item ${isPicked(e.filename) ? 'selected' : ''}`}
-                    onClick={() => toggleLibrary(e)}
-                    disabled={!isPicked(e.filename) && atLimit}
-                  >
-                    <span className="prep-lib-check" aria-hidden="true">
-                      {isPicked(e.filename) ? '✓' : ''}
-                    </span>
-                    <span className="prep-lib-name">
-                      {e.sessionName || prettifyFilename(e.filename)}
-                    </span>
-                    <span className="prep-lib-pages">{e.numPages}p</span>
-                  </button>
-                ))}
-              </div>
+              library.map((e) => (
+                <button
+                  key={e.filename}
+                  type="button"
+                  className={`prep-lib-row ${isPicked(e.filename) ? 'sel' : ''}`}
+                  onClick={() => toggleLibrary(e)}
+                  disabled={!isPicked(e.filename) && atLimit}
+                >
+                  <span className="prep-lib-check" aria-hidden="true">
+                    {isPicked(e.filename) ? '✓' : ''}
+                  </span>
+                  <span className="prep-lib-name">
+                    {e.sessionName || prettifyFilename(e.filename)}
+                  </span>
+                  <span className="prep-lib-pages">{e.numPages}p</span>
+                </button>
+              ))
             )}
-          </div>
 
-          <div className="prep-source-group">
+            <div className="prep-source-label" style={{ marginTop: 16 }}>
+              Upload
+            </div>
             <input
               ref={fileInputRef}
               type="file"
@@ -201,32 +229,35 @@ export function PrepSetup({ onCancel, onStart }: PrepSetupProps) {
             <button
               type="button"
               className="ate-btn"
+              style={{ width: '100%', justifyContent: 'center' }}
               onClick={() => fileInputRef.current?.click()}
               disabled={atLimit}
             >
-              Upload PDFs from computer
+              Upload PDFs from disk
             </button>
           </div>
-        </section>
+        </div>
 
-        <section className="prep-setup-col">
-          <h3 className="prep-setup-h">
-            2 · Selected ({picks.length}/{MAX_PREP_FILES})
-          </h3>
-          {picks.length === 0 ? (
-            <div className="prep-setup-empty">Nothing selected yet.</div>
-          ) : (
-            <div className="prep-pick-list">
-              {picks.map((p) => (
-                <div key={p.id} className="prep-pick-item">
-                  <div className="prep-pick-name" title={p.displayName}>
+        {/* 02 · Selected + context */}
+        <div className="prep-setup-col">
+          <div className="prep-col-head">
+            <span className="prep-col-num">02</span>
+            <span className="prep-col-title">Selected</span>
+            <span className="prep-chip">
+              {picks.length} / {MAX_PREP_FILES}
+            </span>
+          </div>
+          <div className="prep-col-body">
+            {picks.length === 0 ? (
+              <div className="prep-setup-empty">Nothing selected yet.</div>
+            ) : (
+              picks.map((p) => (
+                <div key={p.id} className="prep-pick-row">
+                  <span className="prep-pick-name" title={p.displayName}>
                     {p.displayName}
-                    <span className="prep-pick-src">
-                      {p.source === 'upload' ? 'new' : 'library'}
-                    </span>
-                  </div>
+                  </span>
                   <select
-                    className="prep-role-select"
+                    className="prep-pick-role"
                     value={p.role}
                     onChange={(e) => setRole(p.id, e.target.value as PrepDocRole)}
                   >
@@ -245,55 +276,55 @@ export function PrepSetup({ onCancel, onStart }: PrepSetupProps) {
                     ✕
                   </button>
                 </div>
+              ))
+            )}
+
+            <label className="prep-ctx-label" htmlFor="prep-user-context">
+              Anything Doug should know?
+            </label>
+            <textarea
+              id="prep-user-context"
+              className="prep-ctx-ta"
+              placeholder="e.g. I'm shaky on recursion · focus on application · my exam is Thursday"
+              rows={4}
+              value={userContext}
+              onChange={(e) => setUserContext(e.target.value)}
+            />
+          </div>
+        </div>
+
+        {/* 03 · Intensity */}
+        <div className="prep-setup-col">
+          <div className="prep-col-head">
+            <span className="prep-col-num">03</span>
+            <span className="prep-col-title">Intensity</span>
+          </div>
+          <div className="prep-col-body">
+            <div className="prep-intensity-list">
+              {DIFFICULTIES.map((d) => (
+                <button
+                  key={d.value}
+                  type="button"
+                  className={`prep-intensity-opt ${difficulty === d.value ? 'active' : ''}`}
+                  onClick={() => setDifficulty(d.value)}
+                >
+                  <span className="prep-radio" aria-hidden="true" />
+                  <span>
+                    <span className="prep-intensity-label">{d.label}</span>
+                    <span className="prep-intensity-desc">{d.blurb}</span>
+                  </span>
+                </button>
               ))}
             </div>
-          )}
-
-          <h3 className="prep-setup-h" style={{ marginTop: 20 }}>
-            3 · Intensity
-          </h3>
-          <div className="prep-diff-row">
-            {DIFFICULTIES.map((d) => (
-              <button
-                key={d.value}
-                type="button"
-                className={`prep-diff-btn ${difficulty === d.value ? 'active' : ''}`}
-                onClick={() => setDifficulty(d.value)}
-              >
-                <span className="prep-diff-name">{d.label}</span>
-                <span className="prep-diff-blurb">{d.blurb}</span>
-              </button>
-            ))}
           </div>
-        </section>
-      </div>
-
-      <div className="prep-context-wrap">
-        <label className="prep-setup-h prep-context-label" htmlFor="prep-user-context">
-          4 · Anything Doug should know?
-        </label>
-        <textarea
-          id="prep-user-context"
-          className="prep-context-area"
-          placeholder="e.g. I always mix up memoization vs tabulation · focus on application questions · my exam is in 2 days and I'm shaky on sorting · skip things I'm confident in"
-          rows={3}
-          value={userContext}
-          onChange={(e) => setUserContext(e.target.value)}
-        />
+        </div>
       </div>
 
       <div className="prep-setup-foot">
         <button type="button" className="ate-btn" onClick={onCancel}>
           Cancel
         </button>
-        <button
-          type="button"
-          className="ate-btn ate-btn-primary"
-          onClick={start}
-          disabled={picks.length === 0}
-        >
-          Build curriculum →
-        </button>
+        {buildBtn}
       </div>
     </div>
   )

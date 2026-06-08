@@ -8,6 +8,7 @@ import {
 import { loadPDFFromBytes } from '../../lib/pdf'
 import { initializeCurriculum, type PrepDocInput, type InitResult } from '../../lib/testPrep'
 import type { PrepSetupResult } from './PrepSetup'
+import { PrepHeader } from './PrepHeader'
 
 interface PrepProcessingProps {
   setup: PrepSetupResult
@@ -26,6 +27,8 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
     detail: '',
   })
   const [elapsed, setElapsed] = useState(0)
+  // How many source files have finished their pass — drives the file-status list.
+  const [done, setDone] = useState(0)
   const startedRef = useRef(false)
   const abortRef = useRef<AbortController | null>(null)
   const teardownRef = useRef<number | null>(null)
@@ -84,6 +87,7 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
             label: 'Preparing files',
             detail: `Loading ${i + 1}/${setup.picks.length}: ${p.displayName}`,
           })
+          setDone(i)
           let bytes: Uint8Array
           if (p.file) {
             bytes = new Uint8Array(await p.file.arrayBuffer())
@@ -127,12 +131,14 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
                 detail: "Aligning curriculum to the professor's outline…",
               })
             } else if (stage.phase === 'summarizing') {
+              setDone(stage.current)
               setStatus({
                 kind: 'running',
                 label: 'Summarising materials',
                 detail: `Reading files in parallel — ${stage.current}/${stage.total} done`,
               })
             } else if (stage.phase === 'building-curriculum') {
+              setDone(setup.picks.length)
               setStatus({
                 kind: 'running',
                 label: 'Mapping the curriculum',
@@ -187,31 +193,63 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
   }, [])
 
   return (
-    <div className="prep-processing">
-      <div className="prep-processing-card">
+    <div className="prep-screen">
+      <PrepHeader
+        center={<div className="prep-eyebrow">Building curriculum</div>}
+        right={
+          status.kind === 'running' ? (
+            <button type="button" className="ate-btn" onClick={onCancel}>
+              Cancel
+            </button>
+          ) : null
+        }
+      />
+      <div className="prep-proc-stage">
         {status.kind === 'running' ? (
-          <>
-            <div className="prep-spinner" aria-hidden="true" />
-            <div className="prep-processing-label">{status.label}</div>
-            <div className="prep-processing-detail">{status.detail}</div>
-            <div className="prep-processing-elapsed">
-              Working · {elapsed}s
+          <div className="prep-proc-card">
+            <div className="prep-proc-mark" aria-hidden="true" />
+            <h2 className="prep-proc-heading">{status.label}</h2>
+            {status.detail ? (
+              <p className="prep-proc-detail">{status.detail}</p>
+            ) : null}
+            <span className="prep-chip acc">{elapsed}s · Working</span>
+            <div className="prep-proc-files">
+              {setup.picks.map((p, i) => {
+                const state =
+                  i < done ? 'done' : i === done ? 'active' : 'queued'
+                const icon = state === 'done' ? '✓' : state === 'active' ? '…' : '·'
+                const label =
+                  state === 'done'
+                    ? 'Done'
+                    : state === 'active'
+                      ? 'Reading…'
+                      : 'Queued'
+                return (
+                  <div key={p.id} className={`prep-proc-file ${state}`}>
+                    <span className="prep-proc-icon">{icon}</span>
+                    <span className="prep-proc-fname">{p.displayName}</span>
+                    <span className="prep-proc-status">{label}</span>
+                  </div>
+                )
+              })}
             </div>
-            <div className="prep-processing-note">
-              This one-time pass reads all {setup.picks.length} file
-              {setup.picks.length === 1 ? '' : 's'} via Doug. Open the browser
-              console to watch each request ({'['}prep{']'} logs). Each call
-              times out after 120s.
-            </div>
-          </>
+            <p className="prep-proc-note">
+              This one-time pass sends each file to Doug as a native document
+              block. Open the browser console to follow the [prep] logs. Each
+              call times out after 120s.
+            </p>
+          </div>
         ) : (
-          <>
-            <div className="prep-processing-label">Couldn’t build curriculum</div>
-            <div className="prep-processing-error">{status.message}</div>
+          <div className="prep-proc-card">
+            <div className="prep-proc-mark" aria-hidden="true" />
+            <h2 className="prep-proc-heading">Couldn’t build curriculum</h2>
+            <p className="prep-proc-detail" style={{ color: 'var(--ate-red)' }}>
+              {status.message}
+            </p>
             <button type="button" className="ate-btn" onClick={onCancel}>
               ← Back to setup
             </button>
-          </>
+          </div>
         )}
       </div>
     </div>

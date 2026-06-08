@@ -38,11 +38,12 @@ src/
     Header.tsx                    # 3-col grid; session name, nav controls, export + test-prep + sign-out (hidden in prep)
     LibraryView.tsx               # Card grid with real page-1 thumbnails
     prep/
-      TestPrepMode.tsx            # Phase orchestrator: home | setup | processing | study; home is the prep hub
-      PrepSetup.tsx               # Material picker + roles + difficulty selector
-      PrepProcessing.tsx          # PDF ingestion + Tier 1 curriculum init, progress UI
-      PrepStudy.tsx               # Split-pane study view; session-level interleaving + retry queue; back → "← All preps"
-      CurriculumMap.tsx           # Topic list w/ progress bars + KC chips
+      PrepHeader.tsx              # Shared 56px brand header for Home/Setup/Processing
+      TestPrepMode.tsx            # Phase orchestrator: home | setup | processing | study; home = editorial two-column hub (hero + ruled session list w/ live mastered counts)
+      PrepSetup.tsx               # 3-column setup: Gather materials | Selected + context | Intensity; name bar + footer
+      PrepProcessing.tsx          # PDF ingestion + Tier 1 init; brand-mark card + per-file status list (done/active/queued)
+      PrepStudy.tsx               # Split-pane study view; session-level interleaving + retry queue; study bar w/ progress chip; back → "← All preps"
+      CurriculumMap.tsx           # Ruled topic rows w/ KC dots + mini progress bars
       TopicSession.tsx            # Learn/practice tabs; open-ended + MC question UI
       PrepChatPopup.tsx           # Floating "Ask Doug" chat — viewport-sized, draggable header, edge/corner resize
       ReferencePane.tsx           # Multi-doc slide viewer + auto-surface + bidirectional per-slide notes/chat peek
@@ -118,7 +119,7 @@ npx tsc -b         # type-check only
 | `pdfMeta` | `filename` | `{ filename, byteSize, addedAt, storagePath }` (bytes live in Storage) |
 | `meta` | `lastFilename` | `{ key, value }` |
 | `prepSessions` | `sessionId` | `PrepSessionRecord` (difficulty, status, blueprint, documents) |
-| `prepProgress` | `sessionId::topicId` | `PrepTopicProgressRecord` (status, turns, kcMastery, overview) |
+| `prepProgress` | `sessionId::topicId` | `PrepTopicProgressRecord` (status, turns, kcMastery, overview, pendingQuestions) |
 | **Cloud Storage** | `users/{uid}/pdfs/{filename}` | raw PDF blob |
 | **Local cache only** (`pdfCache`, not synced) | `filename` | PDF blob + thumbnail dataURL |
 
@@ -207,12 +208,21 @@ Both formats carry `kcId`, `difficultyLevel`, and `format` on the `PrepTurn` rec
 
 ### UX components
 
-- **TestPrepMode** — phase orchestrator: `home | setup | processing | study`.
-- **PrepSetup** — material picker (from library or upload), role assignment (lecture/homework/exam/topic-sheet), difficulty selector (Foundational/Thorough/Exam-ready), optional user context textarea.
-- **PrepProcessing** — ingests PDFs, runs Tier 1 init, shows progress.
-- **PrepStudy** — split-pane: left = curriculum map or topic session, right = resizable/collapsible reference pane. Manages session-level state: retry queue, recent topic IDs, turn count (in-memory refs, not persisted). Calls `selectNextQuestion()` and `onAnswerGraded()` to drive adaptive behavior. Shows topic-switch banner when interleaving causes a topic change. **Owns overview generation**: a background prefetch (`ensureOverview`) generates+persists each topic's cited overview once progress loads — sequentially, with the just-opened topic jumped to the front — so overviews are ready before entry and saved immediately (survives navigating away mid-generation). `TopicSession` consumes them via `overview`/`overviewLoading`/`overviewError`/`onRetryOverview` props.
-- **CurriculumMap** — topic cards with progress bars, KC chips (filled/unfilled with labels), status line showing `pts/threshold` and `KCs covered/total`.
-- **TopicSession** — two tabs: **Overview** (teaching primer with cited sections + citation chips that surface slides in the reference pane; generated/cached by PrepStudy and received via props — pure consumer) and **Practice** (one question at a time). Accepts `targetDifficulty`, `targetKcId`, `targetKcLabel` from the session-level selector. Renders either a textarea (open-ended) or `MultipleChoice` component based on question format. **Question prefetch**: the next question is generated in the background while the student works the current one, so "Next" promotes it instantly; each fetch excludes prior + current question text so every Next is a distinct question (never the same one). Provides chat trigger buttons: "Ask about this topic" on the overview tab (when overview is loaded), "Ask about this" on the practice tab (after answer submission only).
+> **Design vocabulary (Direction D · Atelier).** All prep screens use the app's
+> editorial vocabulary: mono all-caps eyebrows, Newsreader serif headers with
+> italic-indigo accents, ruled dividers, counter chips (`prep-chip`), the brand
+> mark, KC dots, and ruled (not boxed) feedback. The lecture Header is hidden in
+> prep; `PrepHeader` supplies the brand header for the non-study phases. Buttons
+> reuse `ate-btn`/`ate-btn-primary`. Prep CSS lives in the "TEST PREP — Direction
+> D" block appended at the end of `globals.css` (single-class rules that win over
+> the older generic prep styles, which are now dead).
+
+- **TestPrepMode** — phase orchestrator: `home | setup | processing | study`. Home is an editorial two-column layout: left = hero + CTAs, right = ruled `prep-session-row` list with diff pills and **live per-session mastered counts** (`getAllProgressForSession`).
+- **PrepSetup** — three ruled columns under a brand header + name bar + footer: **01 Gather materials** (library list + upload), **02 Selected** (picks w/ role pill + "Anything Doug should know?" context), **03 Intensity** (Foundational/Thorough/Exam-ready radios).
+- **PrepProcessing** — ingests PDFs, runs Tier 1 init; centered brand-mark card with Newsreader heading, elapsed chip, and a per-file status list (done/active/queued, driven by a `done` count).
+- **PrepStudy** — split-pane: left = curriculum map or topic session, right = resizable/collapsible reference pane. Manages session-level state: retry queue, recent topic IDs, turn count (in-memory refs, not persisted). Calls `selectNextQuestion()` and `onAnswerGraded()` to drive adaptive behavior. Shows topic-switch banner when interleaving causes a topic change. **Owns overview generation**: a background prefetch (`ensureOverview`) generates+persists each topic's cited overview once progress loads — sequentially, with the just-opened topic jumped to the front — so overviews are ready before entry and saved immediately (survives navigating away mid-generation). `TopicSession` consumes them via `overview`/`overviewLoading`/`overviewError`/`onRetryOverview` props. **Owns the question buffer**: a per-topic queue (`ensureBuffer`, target 3) is pre-generated **concurrently** when a topic opens and refilled as questions are consumed or answered. It lives here (not in `TopicSession`) so prefetching keeps running across tab/topic navigation; `TopicSession` consumes it via `cachedQuestion` (the persisted current) + `onTakeQuestion`/`onAdvanceQuestion`, with an on-demand fetch (`onSetCurrentQuestion`) as the buffer-empty fallback. The buffer is **persisted** to the topic's `prepProgress` record (`pendingQuestions`, index 0 = current displayed) via `syncPending` and restored on load, so **unanswered** questions survive a full prep exit / reload.
+- **CurriculumMap** — ruled topic rows (number, name + summary, KC dots, mini progress bar + `✓ Mastered`/`Not started`/`pts/threshold`); head shows the session title (passed via `title` prop) + mastered chip. Mastered rows go green.
+- **TopicSession** — two tabs: **Overview** (teaching primer with cited sections + citation chips that surface slides in the reference pane; generated/cached by PrepStudy and received via props — pure consumer) and **Practice** (one question at a time). Accepts `targetDifficulty`, `targetKcId`, `targetKcLabel` from the session-level selector. Renders either a textarea (open-ended) or `MultipleChoice` component based on question format. **Question source**: the displayed question comes from PrepStudy's per-topic buffer — "Next" promotes the next buffered one instantly; generation excludes prior + buffered question text so each is distinct, with an on-demand fetch only when the buffer is empty. Provides chat trigger buttons: "Ask about this topic" on the overview tab (when overview is loaded), "Ask about this" on the practice tab (after answer submission only). **Question-history navigator**: a Prev/Next pager (with a "Reviewing N / M" / "Current question" position) lets the student page back through previously answered questions, each re-rendered read-only (`ReviewTurn`) from the persisted `progress.turns` — MC choices show the picked + correct answer, open answers show the typed text, plus the full graded feedback and citation. History is in Firestore, so it survives exiting and reopening prep; "Back to current →" returns to the live question.
 - **PrepChatPopup ("Ask Doug")** — floating chat window. **Default size scales to the viewport** (~30% w / ~72% h, clamped), **draggable by its header**, and **resizable** from the right edge (width), bottom edge (height), or corner (both); geometry persists across close/reopen (in-component state, re-clamped on viewport resize). Session-scoped history persists across all topics/questions. Streams from the configured AI provider (`model: 'smart'`). Context includes current topic, overview, and (after submission) the question, answer, score, and feedback. Opened via TopicSession trigger buttons.
 - **ReferencePane** — vertical scroll carousel of source slides (lazily rasterised via IntersectionObserver with 600px preload margin). `<select>` switches sources. Resizable (drag divider), collapsible. Nudge banner on AI-suggested slides; smooth-scroll + brief highlight. **Bidirectional notes peek:** every slide shows a ✎ badge (solid when it has lecture-mode notes/chat, faded "+" to add); a bottom-sheet renders the slide's note markdown + Ask-Doug chat history and lets you **edit/add notes that autosave back to the lecture note store** (`setNote`, same `filename::slideIndex` key). Surfacing a slide (Tier-3 / citation) auto-opens the sheet only if that slide has content. Notes loaded per active document via `getAllNotesForFile`/`getAllChatsForFile`; empty for prep-only uploads.
 
@@ -235,7 +245,7 @@ PrepTurn              = { questionText, userAnswer, score, correctComponents, mi
                           format?, mcChoices?, mcCorrectIndex?, mcSelectedIndex? }
 KCMasteryRecord       = { attempts, totalScore }
 PrepTopicProgressRecord = { key, sessionId, topicId, status, masteryAccumulated, turns,
-                            overview?, kcMastery? }
+                            overview?, kcMastery?, pendingQuestions? }
 RetryItem             = { topicId, kcId?, questionsUntilRetry }
 MasteryConfig         = { pointThreshold, minKCAttempts, minKCAvgScore, minDifficultyReached,
                           interleaving, retryEnabled, retryDelay, reviewInterval }

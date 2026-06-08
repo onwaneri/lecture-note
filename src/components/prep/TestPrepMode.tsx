@@ -1,15 +1,29 @@
 import { useCallback, useEffect, useState } from 'react'
 import {
   deletePrepSession,
+  getAllProgressForSession,
   listPrepSessions,
-  MASTERY_THRESHOLDS,
+  type PrepDifficulty,
   type PrepSessionRecord,
 } from '../../lib/db'
 import { PrepSetup, type PrepSetupResult } from './PrepSetup'
 import { PrepProcessing } from './PrepProcessing'
 import { PrepStudy } from './PrepStudy'
+import { PrepHeader } from './PrepHeader'
 
 type Phase = 'home' | 'setup' | 'processing' | 'study'
+
+const DIFF_LABEL: Record<PrepDifficulty, string> = {
+  foundational: 'Foundational',
+  thorough: 'Thorough',
+  'exam-ready': 'Exam-ready',
+}
+/** Difficulty → diff-pill modifier class (design uses `exam`, not `exam-ready`). */
+const DIFF_PILL: Record<PrepDifficulty, string> = {
+  foundational: 'foundational',
+  thorough: 'thorough',
+  'exam-ready': 'exam',
+}
 
 interface TestPrepModeProps {
   /** Library files available to pull into a session. */
@@ -19,13 +33,29 @@ interface TestPrepModeProps {
 export function TestPrepMode({ onExit }: TestPrepModeProps) {
   const [phase, setPhase] = useState<Phase>('home')
   const [sessions, setSessions] = useState<PrepSessionRecord[]>([])
+  const [masteredCounts, setMasteredCounts] = useState<Record<string, number>>(
+    {},
+  )
   const [setupResult, setSetupResult] = useState<PrepSetupResult | null>(null)
   const [activeSession, setActiveSession] = useState<PrepSessionRecord | null>(
     null,
   )
 
   const refresh = useCallback(async () => {
-    setSessions(await listPrepSessions())
+    const list = await listPrepSessions()
+    setSessions(list)
+    // Live per-session mastered counts for the progress column.
+    const entries = await Promise.all(
+      list.map(async (s) => {
+        const prog = await getAllProgressForSession(s.sessionId)
+        let mastered = 0
+        prog.forEach((r) => {
+          if (r.status === 'mastered') mastered++
+        })
+        return [s.sessionId, mastered] as const
+      }),
+    )
+    setMasteredCounts(Object.fromEntries(entries))
   }, [])
 
   useEffect(() => {
@@ -83,74 +113,125 @@ export function TestPrepMode({ onExit }: TestPrepModeProps) {
 
   // Home
   return (
-    <div className="prep-home">
-      <div className="prep-home-head">
-        <div>
-          <div className="prep-eyebrow">Test Prep Mode</div>
-          <h1 className="prep-home-title">Master the material, one topic at a time.</h1>
+    <div className="prep-screen">
+      <PrepHeader
+        center={
+          <>
+            <div className="prep-eyebrow">Test Prep</div>
+            <span className="prep-chip">
+              {sessions.length} session{sessions.length === 1 ? '' : 's'}
+            </span>
+          </>
+        }
+        right={
+          <>
+            <button type="button" className="ate-btn" onClick={onExit}>
+              Back to notes
+            </button>
+            <button
+              type="button"
+              className="ate-btn ate-btn-primary"
+              onClick={() => setPhase('setup')}
+            >
+              New session →
+            </button>
+          </>
+        }
+      />
+      <div className="prep-home-body">
+        <div className="prep-home-left">
+          <div className="prep-eyebrow">Test Prep</div>
+          <h1 className="prep-display prep-home-heading">
+            Master the material, <em>one topic at a time.</em>
+          </h1>
           <p className="prep-home-sub">
-            Pull in your slides, homework, and a practice exam. We map the
-            scope, then drill you with graded questions until each topic is
-            mastered.
+            Pull in your slides, homework, and a practice exam. Doug maps the
+            scope, then drills you with graded questions until each topic is
+            mastered — foundations first, but the order is yours.
           </p>
+          <div className="prep-home-ctas">
+            <button
+              type="button"
+              className="ate-btn ate-btn-primary"
+              onClick={() => setPhase('setup')}
+            >
+              New prep session →
+            </button>
+            <button type="button" className="ate-btn" onClick={onExit}>
+              Back to notes
+            </button>
+          </div>
         </div>
-        <div className="prep-home-actions">
-          <button
-            type="button"
-            className="ate-btn ate-btn-primary"
-            onClick={() => setPhase('setup')}
-          >
-            New prep session
-          </button>
-          <button type="button" className="ate-btn" onClick={onExit}>
-            Back to notes
-          </button>
+
+        <div className="prep-home-right">
+          <div className="prep-home-right-head">
+            <div className="prep-home-right-title">Sessions</div>
+            <span className="prep-chip">{sessions.length} total</span>
+          </div>
+          {sessions.length > 0 ? (
+            <div className="prep-sessions-list">
+              {sessions.map((s, i) => {
+                const total = s.blueprint.topics.length
+                const mastered = masteredCounts[s.sessionId] ?? 0
+                const done =
+                  s.status === 'completed' || (total > 0 && mastered >= total)
+                const pct = total > 0 ? Math.round((mastered / total) * 100) : 0
+                return (
+                  <div
+                    key={s.sessionId}
+                    className="prep-session-row"
+                    onClick={() => openSession(s)}
+                    role="button"
+                    tabIndex={0}
+                  >
+                    <div className="prep-session-n">
+                      {String(i + 1).padStart(2, '0')}
+                    </div>
+                    <div className="prep-session-info">
+                      <div className="prep-session-title">{s.title}</div>
+                      <div className="prep-session-meta">
+                        <span className={`prep-diff-pill ${DIFF_PILL[s.difficulty]}`}>
+                          {DIFF_LABEL[s.difficulty]}
+                        </span>
+                        <span className="prep-session-docs">
+                          {total} topics · {s.documents.length} source
+                          {s.documents.length === 1 ? '' : 's'}
+                        </span>
+                      </div>
+                    </div>
+                    <div className="prep-session-prog">
+                      <div className="prep-prog-bar">
+                        <div
+                          className={`prep-prog-fill${done ? ' done' : ''}`}
+                          style={{ width: `${done ? 100 : pct}%` }}
+                        />
+                      </div>
+                      <div className={`prep-session-status${done ? ' done' : ''}`}>
+                        {done ? '✓ Complete' : `${mastered} / ${total} mastered`}
+                      </div>
+                    </div>
+                    <button
+                      type="button"
+                      className="prep-session-del"
+                      title="Delete session"
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        void handleDelete(s.sessionId)
+                      }}
+                    >
+                      ✕
+                    </button>
+                  </div>
+                )
+              })}
+            </div>
+          ) : (
+            <div className="prep-empty">
+              No prep sessions yet. Start one to map your study scope.
+            </div>
+          )}
         </div>
       </div>
-
-      {sessions.length > 0 ? (
-        <div className="prep-session-grid">
-          {sessions.map((s) => {
-            const total = s.blueprint.topics.length
-            const perTopic = MASTERY_THRESHOLDS[s.difficulty]
-            return (
-              <div key={s.sessionId} className="prep-session-card">
-                <button
-                  type="button"
-                  className="prep-session-open"
-                  onClick={() => openSession(s)}
-                >
-                  <div className="prep-session-title">{s.title}</div>
-                  <div className="prep-session-meta">
-                    <span className={`prep-diff prep-diff-${s.difficulty}`}>
-                      {s.difficulty}
-                    </span>
-                    <span>{total} topics</span>
-                    <span>{perTopic} pts/topic</span>
-                  </div>
-                  <div className="prep-session-docs">
-                    {s.documents.length} source
-                    {s.documents.length === 1 ? '' : 's'} ·{' '}
-                    {s.status === 'completed' ? 'Completed' : 'In progress'}
-                  </div>
-                </button>
-                <button
-                  type="button"
-                  className="prep-session-del"
-                  title="Delete"
-                  onClick={() => handleDelete(s.sessionId)}
-                >
-                  ✕
-                </button>
-              </div>
-            )
-          })}
-        </div>
-      ) : (
-        <div className="prep-empty">
-          No prep sessions yet. Start one to map your study scope.
-        </div>
-      )}
     </div>
   )
 }

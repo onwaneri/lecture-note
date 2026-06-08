@@ -72,10 +72,16 @@ interface TopicSessionProps {
   onRequestNext?: () => void
   /** Open the session-level chat popup with context. */
   onOpenChat?: (ctx: PrepChatContext) => void
-  /** Cached unanswered question for this topic (survives unmount/remount). */
+  /** The topic's current unanswered question, persisted in the parent buffer. */
   cachedQuestion?: GeneratedQuestion | null
-  /** Cache a newly generated question in the parent so it survives navigation. */
-  onCacheQuestion?: (q: GeneratedQuestion) => void
+  /** Pull the current (or next buffered) question from the parent buffer. */
+  onTakeQuestion?: (topicId: string) => GeneratedQuestion | null
+  /** Advance to the next buffered question (after answering). */
+  onAdvanceQuestion?: (topicId: string) => GeneratedQuestion | null
+  /** Store an on-demand-generated question as the current (buffer-empty path). */
+  onSetCurrentQuestion?: (topicId: string, q: GeneratedQuestion | null) => void
+  /** Ask the parent to keep this topic's question buffer filled. */
+  onPrimeQuestions?: (topicId: string) => void
 }
 
 type Mode = 'learn' | 'practice'
@@ -96,7 +102,10 @@ export function TopicSession({
   onRequestNext,
   onOpenChat,
   cachedQuestion,
-  onCacheQuestion,
+  onTakeQuestion,
+  onAdvanceQuestion,
+  onSetCurrentQuestion,
+  onPrimeQuestions,
 }: TopicSessionProps) {
   const [mode, setMode] = useState<Mode>('learn')
 
@@ -104,10 +113,9 @@ export function TopicSession({
   // via props. A local ticker just gives feedback while it's still loading.
   const [overviewElapsed, setOverviewElapsed] = useState(0)
 
-  // Practice phase
+  // Practice phase — the question buffer (current + upcoming) is owned by
+  // PrepStudy; this is just the displayed question.
   const [generatedQ, setGeneratedQ] = useState<GeneratedQuestion | null>(null)
-  // Prefetched next question — promoted instantly when the student clicks Next.
-  const [nextQ, setNextQ] = useState<GeneratedQuestion | null>(null)
   const [loadingQuestion, setLoadingQuestion] = useState(false)
   const [answer, setAnswer] = useState('')
   const [grading, setGrading] = useState(false)
@@ -118,14 +126,18 @@ export function TopicSession({
   const [mcSelected, setMcSelected] = useState<number | null>(null)
   const [mcSubmitted, setMcSubmitted] = useState(false)
 
+  // Review state — index into the persisted `progress.turns` history. `null`
+  // means the live (current) question; a number shows that past answered
+  // question read-only. History survives exit/re-entry (it's in Firestore).
+  const [reviewIndex, setReviewIndex] = useState<number | null>(null)
+
   const questionReqRef = useRef(0)
-  const prefetchTokenRef = useRef(0)
-  const prefetchInFlight = useRef(false)
 
   const accumulated = progress?.masteryAccumulated ?? 0
   const mastered = accumulated >= topic.masteryThreshold
   const pct = Math.min(100, Math.round((accumulated / topic.masteryThreshold) * 100))
-  const hasPracticed = (progress?.turns?.length ?? 0) > 0
+  const turns = progress?.turns ?? []
+  const hasPracticed = turns.length > 0
 
   // Tick while the overview is generating (it reads the slides + thinks) so the
   // wait never looks frozen.
@@ -141,15 +153,14 @@ export function TopicSession({
   // navigating away and back doesn't regenerate.
   useEffect(() => {
     questionReqRef.current++
-    prefetchTokenRef.current++
     setMode('learn')
     setGeneratedQ(cachedQuestion ?? null)
-    setNextQ(null)
     setResult(null)
     setAnswer('')
     setError(null)
     setMcSelected(null)
     setMcSubmitted(false)
+    setReviewIndex(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topic.id])
 
@@ -177,29 +188,22 @@ export function TopicSession({
     [topic, session, accumulated, targetDifficulty, targetKcId, targetKcLabel, progress],
   )
 
-  // Prefetch the next question in the background so "Next" is instant.
-  const prefetchNext = useCallback(
-    async (excludeText?: string) => {
-      if (prefetchInFlight.current) return
-      prefetchInFlight.current = true
-      const token = ++prefetchTokenRef.current
-      try {
-        const q = await requestQuestion(excludeText ? [excludeText] : [])
-        if (token === prefetchTokenRef.current) setNextQ(q)
-      } catch {
-        // Best-effort — if it fails we just fetch on demand when Next is clicked.
-      } finally {
-        prefetchInFlight.current = false
-      }
-    },
-    [requestQuestion],
-  )
+  // Promote a question into the displayed slot, resetting answer state.
+  const promote = useCallback((q: GeneratedQuestion) => {
+    questionReqRef.current++ // supersede any in-flight on-demand fetch
+    setGeneratedQ(q)
+    setResult(null)
+    setAnswer('')
+    setError(null)
+    setMcSelected(null)
+    setMcSubmitted(false)
+    setLoadingQuestion(false)
+  }, [])
 
-  // Fetch the current question on demand (no prefetch ready), then prefetch next.
-  const fetchCurrent = useCallback(async () => {
+  // Fallback when the parent buffer is empty — generate one on demand and store
+  // it as the topic's current so it survives navigation.
+  const fetchOnDemand = useCallback(async () => {
     const token = ++questionReqRef.current
-    prefetchTokenRef.current++ // cancel any stale prefetch result
-    prefetchInFlight.current = false // allow a fresh prefetch to start after
     setLoadingQuestion(true)
     setError(null)
     setResult(null)
@@ -207,29 +211,31 @@ export function TopicSession({
     setGeneratedQ(null)
     setMcSelected(null)
     setMcSubmitted(false)
-    setNextQ(null)
     try {
       const q = await requestQuestion([])
       if (token !== questionReqRef.current) return
       setGeneratedQ(q)
-      onCacheQuestion?.(q)
-      void prefetchNext(q.questionText)
+      onSetCurrentQuestion?.(topic.id, q)
     } catch (e) {
       if (token !== questionReqRef.current) return
       setError(e instanceof Error ? e.message : 'Failed to load a question.')
     } finally {
       if (token === questionReqRef.current) setLoadingQuestion(false)
     }
-  }, [requestQuestion, prefetchNext, onCacheQuestion])
+  }, [requestQuestion, onSetCurrentQuestion, topic.id])
+
+  // Show the topic's current question — instant from the parent buffer, else
+  // an on-demand fetch.
+  const loadCurrent = useCallback(() => {
+    const q = onTakeQuestion?.(topic.id) ?? null
+    if (q) promote(q)
+    else void fetchOnDemand()
+  }, [onTakeQuestion, topic.id, promote, fetchOnDemand])
 
   function startPractice() {
     setMode('practice')
-    if (!generatedQ && !mastered) {
-      void fetchCurrent()
-    } else if (generatedQ && !nextQ && !mastered) {
-      // Restored/cached question with no prefetch yet — warm one up.
-      void prefetchNext(generatedQ.questionText)
-    }
+    onPrimeQuestions?.(topic.id) // keep the buffer topped up
+    if (!generatedQ && !mastered) loadCurrent()
   }
 
   /** Submit an MC answer — graded client-side. */
@@ -270,9 +276,6 @@ export function TopicSession({
     if (!correct && topic.keySlides.length > 0) {
       onSurfaceSlide(topic.keySlides[0])
     }
-    // Start prefetching the next question immediately so it's ready when the
-    // student clicks "Next question".
-    void prefetchNext(generatedQ.questionText)
   }
 
   /** Submit an open-ended answer — graded via API. */
@@ -303,8 +306,6 @@ export function TopicSession({
       onRecordTurn(turn)
       setResult(r)
       if (r.suggestedSlide && r.score < 1) onSurfaceSlide(r.suggestedSlide)
-      // Prefetch the next question while the student reviews feedback.
-      void prefetchNext(generatedQ.questionText)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Grading failed.')
     } finally {
@@ -321,23 +322,23 @@ export function TopicSession({
 
   function handleNext() {
     onRequestNext?.()
-    if (nextQ) {
-      // Instant: promote the prefetched question and warm up the one after it.
-      const promoted = nextQ
-      questionReqRef.current++ // supersede any in-flight on-demand fetch
-      setGeneratedQ(promoted)
-      onCacheQuestion?.(promoted)
-      setNextQ(null)
-      setResult(null)
-      setAnswer('')
-      setError(null)
-      setMcSelected(null)
-      setMcSubmitted(false)
-      setLoadingQuestion(false)
-      void prefetchNext(promoted.questionText)
-    } else {
-      void fetchCurrent()
-    }
+    // Promote the next buffered question instantly; fall back to on-demand.
+    const q = onAdvanceQuestion?.(topic.id) ?? null
+    if (q) promote(q)
+    else void fetchOnDemand()
+  }
+
+  /** Step back into answered-question history (or enter it from the live view). */
+  function reviewPrev() {
+    setReviewIndex((idx) => (idx === null ? turns.length - 1 : Math.max(0, idx - 1)))
+  }
+  /** Step forward; past the most recent answered question returns to the live one. */
+  function reviewNext() {
+    setReviewIndex((idx) => {
+      if (idx === null) return null
+      if (idx >= turns.length - 1) return null
+      return idx + 1
+    })
   }
 
   /** Build chat context for the current state. */
@@ -389,26 +390,29 @@ export function TopicSession({
   return (
     <div className="prep-topic-session">
       <div className="prep-ts-head">
-        <h2 className="prep-ts-title">{topic.title}</h2>
-        <div className="prep-ts-mastery">
-          <div className="prep-topic-bar">
-            <div className="prep-topic-bar-fill" style={{ width: `${pct}%` }} />
+        <div className="prep-eyebrow acc">
+          Topic {String(topic.order + 1).padStart(2, '0')}
+        </div>
+        <h2 className="prep-display prep-ts-title">{topic.title}</h2>
+        <div className="prep-ts-prog">
+          <div className="prep-ts-bar">
+            <div className="prep-ts-bar-fill" style={{ width: `${pct}%` }} />
           </div>
-          <span className="prep-ts-pts">
+          <span className="prep-chip">
             {accumulated} / {topic.masteryThreshold} pts
           </span>
         </div>
-        <div className="prep-ts-tabs">
+        <div className="prep-tabs">
           <button
             type="button"
-            className={`prep-ts-tab ${mode === 'learn' ? 'active' : ''}`}
+            className={`prep-tab ${mode === 'learn' ? 'active' : ''}`}
             onClick={() => setMode('learn')}
           >
             Overview
           </button>
           <button
             type="button"
-            className={`prep-ts-tab ${mode === 'practice' ? 'active' : ''}`}
+            className={`prep-tab ${mode === 'practice' ? 'active' : ''}`}
             onClick={startPractice}
           >
             Practice
@@ -504,6 +508,10 @@ export function TopicSession({
           keySlides={topic.keySlides}
           documents={session.documents}
           onSurfaceSlide={onSurfaceSlide}
+          turns={turns}
+          reviewIndex={reviewIndex}
+          onReviewPrev={reviewPrev}
+          onReviewNext={reviewNext}
         />
       )}
     </div>
@@ -534,6 +542,12 @@ interface PracticeViewProps {
   /** Session documents for resolving display names. */
   documents: PrepSessionRecord['documents']
   onSurfaceSlide: (slide: KeySlide, force?: boolean) => void
+  /** Persisted answered-question history. */
+  turns: PrepTurn[]
+  /** Index into `turns` being reviewed, or null for the live question. */
+  reviewIndex: number | null
+  onReviewPrev: () => void
+  onReviewNext: () => void
 }
 
 function PracticeView({
@@ -557,13 +571,19 @@ function PracticeView({
   keySlides,
   documents,
   onSurfaceSlide,
+  turns,
+  reviewIndex,
+  onReviewPrev,
+  onReviewNext,
 }: PracticeViewProps) {
   const question = generatedQ?.questionText ?? null
   const isMC = generatedQ?.format === 'mc'
+  const reviewing = reviewIndex !== null
+  const showLive = !reviewing && (!mastered || question || loadingQuestion)
 
   return (
     <>
-      {mastered ? (
+      {mastered && !reviewing ? (
         <div className="prep-mastered-banner">
           <div className="prep-mastered-emoji" aria-hidden="true">
             ✓
@@ -584,35 +604,71 @@ function PracticeView({
         </div>
       ) : null}
 
-      {!mastered || question ? (
+      {reviewing || showLive || turns.length > 0 ? (
         <div className="prep-qa">
-          <div className="prep-q-block">
-            <div className="prep-q-label">
-              Question
-              {generatedQ?.difficultyLevel ? (
-                <span className="prep-q-diff" title="Difficulty level">
-                  Lv {generatedQ.difficultyLevel}
-                </span>
-              ) : null}
+          {turns.length > 0 ? (
+            <div className="prep-q-nav">
               <button
                 type="button"
-                className="prep-review-link"
-                onClick={onReviewOverview}
+                className="prep-q-nav-btn"
+                onClick={onReviewPrev}
+                disabled={reviewIndex === 0}
+                title="Previous question"
               >
-                ↩ Review overview
+                ← Prev
+              </button>
+              <span className="prep-q-nav-pos">
+                {reviewIndex === null
+                  ? 'Current question'
+                  : `Reviewing ${reviewIndex + 1} / ${turns.length}`}
+              </span>
+              <button
+                type="button"
+                className="prep-q-nav-btn"
+                onClick={onReviewNext}
+                disabled={reviewIndex === null}
+                title="Next question"
+              >
+                {reviewIndex !== null && reviewIndex === turns.length - 1
+                  ? 'Back to current →'
+                  : 'Next →'}
               </button>
             </div>
-            {loadingQuestion ? (
-              <div className="prep-q-loading">
-                <span className="prep-spinner small" aria-hidden="true" />
-                Writing a question…
-              </div>
-            ) : question ? (
-              <div className="prep-q-text">{question}</div>
-            ) : (
-              <div className="prep-q-loading">No question yet.</div>
-            )}
+          ) : null}
+
+          {reviewing ? (
+            <ReviewTurn
+              turn={turns[reviewIndex]}
+              documents={documents}
+              onSurfaceSlide={onSurfaceSlide}
+            />
+          ) : showLive ? (
+            <>
+          <div className="prep-q-meta">
+            <span className="prep-eyebrow">Question</span>
+            {generatedQ?.difficultyLevel ? (
+              <span className="prep-chip" title="Difficulty level">
+                Lv {generatedQ.difficultyLevel}
+              </span>
+            ) : null}
+            <button
+              type="button"
+              className="prep-q-review"
+              onClick={onReviewOverview}
+            >
+              ↩ Review overview
+            </button>
           </div>
+          {loadingQuestion ? (
+            <div className="prep-q-loading">
+              <span className="prep-spinner small" aria-hidden="true" />
+              Writing a question…
+            </div>
+          ) : question ? (
+            <div className="prep-q-text">{question}</div>
+          ) : (
+            <div className="prep-q-loading">No question yet.</div>
+          )}
 
           {isMC && generatedQ?.choices ? (
             <MultipleChoice
@@ -664,10 +720,101 @@ function PracticeView({
               onSurfaceSlide={onSurfaceSlide}
             />
           )}
+            </>
+          ) : (
+            <div className="prep-q-loading">
+              Use “← Prev” to review your answered questions.
+            </div>
+          )}
         </div>
       ) : null}
 
-      {error ? <div className="prep-error">{error}</div> : null}
+      {error && !reviewing ? <div className="prep-error">{error}</div> : null}
+    </>
+  )
+}
+
+/** Read-only render of a previously answered question from history. */
+function ReviewTurn({
+  turn,
+  documents,
+  onSurfaceSlide,
+}: {
+  turn: PrepTurn
+  documents: PrepSessionRecord['documents']
+  onSurfaceSlide: (slide: KeySlide, force?: boolean) => void
+}) {
+  const isMC = turn.format === 'mc' && (turn.mcChoices?.length ?? 0) > 0
+  const scorePct = Math.round(turn.score * 100)
+  return (
+    <>
+      <div className="prep-q-meta">
+        <span className="prep-eyebrow">Question</span>
+        {turn.difficultyLevel ? (
+          <span className="prep-chip" title="Difficulty level">
+            Lv {turn.difficultyLevel}
+          </span>
+        ) : null}
+        <span className="prep-q-reviewing">Answered</span>
+      </div>
+      <div className="prep-q-text">{turn.questionText}</div>
+
+      {isMC ? (
+        <div className="prep-mc-choices">
+          {turn.mcChoices!.map((choice, i) => {
+            let cls = 'prep-mc-card'
+            if (i === turn.mcCorrectIndex) cls += ' correct'
+            else if (i === turn.mcSelectedIndex) cls += ' wrong'
+            else cls += ' other'
+            return (
+              <div key={i} className={cls}>
+                <span className="prep-mc-letter">{CHOICE_LABELS[i]}</span>
+                <span className="prep-mc-text">{choice}</span>
+              </div>
+            )
+          })}
+        </div>
+      ) : (
+        <div className="prep-review-answer">
+          <div className="prep-review-answer-label">Your answer</div>
+          <div className="prep-review-answer-text">
+            {turn.userAnswer || '(no answer)'}
+          </div>
+        </div>
+      )}
+
+      <div className="prep-feedback">
+        <div className="prep-score-row">
+          <ScoreDots score={turn.score} />
+          <span className="prep-score-num">+{turn.score} pt</span>
+          <span className="prep-score-pct">{scorePct}%</span>
+        </div>
+        {turn.correctComponents ? (
+          <div className="prep-fb-item">
+            <div className="prep-fb-h prep-fb-good">What you got right</div>
+            <div className="prep-fb-body">{turn.correctComponents}</div>
+          </div>
+        ) : null}
+        {turn.missingComponents ? (
+          <div className="prep-fb-item">
+            <div className="prep-fb-h prep-fb-miss">What was missing</div>
+            <div className="prep-fb-body">{turn.missingComponents}</div>
+          </div>
+        ) : null}
+        {turn.correction ? (
+          <div className="prep-fb-item">
+            <div className="prep-fb-h">Why</div>
+            <div className="prep-fb-body">{turn.correction}</div>
+          </div>
+        ) : null}
+        {turn.suggestedSlide ? (
+          <CitationChip
+            slide={turn.suggestedSlide}
+            documents={documents}
+            onSurfaceSlide={onSurfaceSlide}
+          />
+        ) : null}
+      </div>
     </>
   )
 }

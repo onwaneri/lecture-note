@@ -361,6 +361,7 @@ export function ReferencePane({
   return (
     <aside className="prep-ref">
       <div className="prep-ref-head">
+        <div className="prep-eyebrow">Reference</div>
         <select
           className="prep-ref-select"
           value={activeFilename}
@@ -384,7 +385,7 @@ export function ReferencePane({
           onClick={onCollapse}
           title="Hide reference"
         >
-          »
+          « Hide
         </button>
       </div>
 

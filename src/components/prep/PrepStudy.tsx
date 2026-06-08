@@ -26,7 +26,7 @@ import {
   selectNextQuestion,
   type NextQuestion,
 } from '../../lib/questionSelector'
-import { createDocumentCache, generateOverview, type GeneratedQuestion, type TopicOverview } from '../../lib/testPrep'
+import { createDocumentCache, generateOverview, generateQuestion, type GeneratedQuestion, type TopicOverview } from '../../lib/testPrep'
 import { usePrepDocs } from '../../hooks/usePrepDocs'
 import { CurriculumMap } from './CurriculumMap'
 import { TopicSession } from './TopicSession'
@@ -86,9 +86,60 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
   const sessionTurnCountRef = useRef(0)
   const [targetQuestion, setTargetQuestion] = useState<NextQuestion | null>(null)
 
-  // Cached unanswered questions per topic — survives TopicSession unmount/remount
-  // so navigating to the curriculum map and back doesn't regenerate.
-  const pendingQRef = useRef<Map<string, GeneratedQuestion>>(new Map())
+  // Per-topic question buffer — owned here (not in TopicSession) so generation
+  // is pre-warmed concurrently and survives leaving the topic / switching tabs.
+  // `current` = the displayed unanswered question (restored on remount);
+  // `buffer` = a few questions queued ahead so "Next" is instant.
+  const QUESTION_BUFFER = 3
+  const qStoreRef = useRef<
+    Map<string, { current: GeneratedQuestion | null; buffer: GeneratedQuestion[] }>
+  >(new Map())
+  const qFillingRef = useRef<Set<string>>(new Set())
+
+  function qSlot(topicId: string) {
+    let s = qStoreRef.current.get(topicId)
+    if (!s) {
+      s = { current: null, buffer: [] }
+      qStoreRef.current.set(topicId, s)
+    }
+    return s
+  }
+  /** The topic's persisted pending list: [current?, ...buffer]. */
+  const pendingOf = useCallback(
+    (topicId: string): GeneratedQuestion[] | undefined => {
+      const s = qStoreRef.current.get(topicId)
+      if (!s) return undefined
+      const arr = [...(s.current ? [s.current] : []), ...s.buffer]
+      return arr.length ? arr : undefined
+    },
+    [],
+  )
+  // Persist the buffer into the topic's progress record (preserving the rest)
+  // and re-render so `cachedQuestion` re-reads. Mirrors saveOverview's merge so
+  // unanswered questions survive a full prep exit / reload.
+  const syncPending = useCallback(
+    (topicId: string) => {
+      setProgress((prev) => {
+        const existing = prev.get(topicId)
+        const record: PrepTopicProgressRecord = {
+          key: progressKey(session.sessionId, topicId),
+          sessionId: session.sessionId,
+          topicId,
+          status: existing?.status ?? 'unlocked',
+          masteryAccumulated: existing?.masteryAccumulated ?? 0,
+          turns: existing?.turns ?? [],
+          overview: existing?.overview,
+          kcMastery: existing?.kcMastery,
+          pendingQuestions: pendingOf(topicId),
+        }
+        void putTopicProgress(record)
+        const next = new Map(prev)
+        next.set(topicId, record)
+        return next
+      })
+    },
+    [session.sessionId, pendingOf],
+  )
 
   // Server-side document cache (Gemini context caching) — created once per
   // session, reused across all overview generation calls.
@@ -142,6 +193,17 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     let cancelled = false
     getAllProgressForSession(session.sessionId).then((m) => {
       if (cancelled) return
+      // Restore any persisted unanswered questions into the in-memory buffer so
+      // the student resumes on the same question after a full exit / reload.
+      m.forEach((rec, topicId) => {
+        const pending = rec.pendingQuestions
+        if (pending && pending.length) {
+          qStoreRef.current.set(topicId, {
+            current: pending[0],
+            buffer: pending.slice(1),
+          })
+        }
+      })
       setProgress(m)
       setReady(true)
     })
@@ -170,11 +232,111 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     setTargetQuestion(next)
   }, [topics, progress, session.difficulty, selectedTopicId])
 
+  // Fill a topic's question buffer concurrently up to QUESTION_BUFFER. Runs here
+  // (not in TopicSession) so it keeps going after the student leaves the topic.
+  const ensureBuffer = useCallback(
+    async (topicId: string) => {
+      if (qFillingRef.current.has(topicId)) return
+      const topic = topics.find((t) => t.id === topicId)
+      if (!topic) return
+      const rec = progressRef.current.get(topicId)
+      const accumulated = rec?.masteryAccumulated ?? 0
+      if (accumulated >= topic.masteryThreshold) return // mastered — stop prefetching
+      const slot = qSlot(topicId)
+      const need = QUESTION_BUFFER - slot.buffer.length
+      if (need <= 0) return
+      qFillingRef.current.add(topicId)
+      try {
+        const target = selectNextQuestion({
+          topics,
+          progress: progressRef.current,
+          difficulty: session.difficulty,
+          retryQueue: retryQueueRef.current,
+          recentTopicIds: [],
+          turnCount: sessionTurnCountRef.current,
+          currentTopicId: topicId,
+        })
+        // The selector may interleave to another topic; only apply its KC/
+        // difficulty target when it's actually for this topic.
+        const useTarget = target.topicId === topicId
+        const asked = [
+          ...(rec?.turns ?? []).map((t) => t.questionText),
+          ...(slot.current ? [slot.current.questionText] : []),
+          ...slot.buffer.map((q) => q.questionText),
+        ]
+        const generated = await Promise.all(
+          Array.from({ length: need }, () =>
+            generateQuestion({
+              topic,
+              difficulty: session.difficulty,
+              examBlueprint: session.blueprint.examBlueprint,
+              askedQuestions: asked,
+              masteryAccumulated: accumulated,
+              targetDifficulty: useTarget ? target.targetDifficulty : undefined,
+              targetKcId: useTarget ? target.targetKcId : undefined,
+              targetKcLabel: useTarget ? target.targetKcLabel : undefined,
+              preferMC: useTarget && (target.targetDifficulty ?? 2) <= 1,
+            }).catch((e) => {
+              console.warn('[prep] question prefetch failed', e)
+              return null
+            }),
+          ),
+        )
+        // Concurrent gens can collide — dedupe against history + each other.
+        const seen = new Set(asked)
+        for (const q of generated) {
+          if (q && !seen.has(q.questionText)) {
+            seen.add(q.questionText)
+            slot.buffer.push(q)
+          }
+        }
+        syncPending(topicId)
+      } finally {
+        qFillingRef.current.delete(topicId)
+      }
+    },
+    [topics, session, syncPending],
+  )
+  const ensureBufferRef = useRef(ensureBuffer)
+  ensureBufferRef.current = ensureBuffer
+
+  /** Current question for a topic, promoting the next buffered one if needed. */
+  const takeQuestion = useCallback(
+    (topicId: string): GeneratedQuestion | null => {
+      const slot = qSlot(topicId)
+      if (!slot.current) slot.current = slot.buffer.shift() ?? null
+      syncPending(topicId)
+      void ensureBufferRef.current(topicId)
+      return slot.current
+    },
+    [syncPending],
+  )
+  /** Discard the current (answered) question and promote the next buffered one. */
+  const advanceQuestion = useCallback(
+    (topicId: string): GeneratedQuestion | null => {
+      const slot = qSlot(topicId)
+      slot.current = slot.buffer.shift() ?? null
+      syncPending(topicId)
+      void ensureBufferRef.current(topicId)
+      return slot.current
+    },
+    [syncPending],
+  )
+  /** Store an on-demand-generated question as the current (buffer-empty fallback). */
+  const setCurrentQuestion = useCallback(
+    (topicId: string, q: GeneratedQuestion | null) => {
+      qSlot(topicId).current = q
+      syncPending(topicId)
+    },
+    [syncPending],
+  )
+
   const recordTurn = useCallback(
     async (topicId: string, turn: PrepTurn) => {
-      // Question was answered — clear the pending cache so a fresh question
-      // is generated next time the student hits "Next question".
-      pendingQRef.current.delete(topicId)
+      // Question was answered — drop the current so a remount shows a fresh one;
+      // the buffer already holds the next (refilled here for the latest target).
+      qSlot(topicId).current = null
+      void ensureBufferRef.current(topicId)
 
       const topic = topics.find((t) => t.id === topicId)
       if (!topic) return
@@ -213,6 +375,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
           turns: [...(latest?.turns ?? []), turn],
           overview: latest?.overview,
           kcMastery: postResult.kcMastery,
+          pendingQuestions: pendingOf(topicId),
         }
         updatedRecord.status = canMarkMastered(topic, updatedRecord, config)
           ? 'mastered'
@@ -254,6 +417,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
           turns: existing?.turns ?? [],
           overview,
           kcMastery: existing?.kcMastery,
+          pendingQuestions: pendingOf(topicId),
         }
         void putTopicProgress(record)
         const next = new Map(prev)
@@ -336,6 +500,13 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     void ensureOverviewRef.current(selectedTopicId)
   }, [ready, selectedTopicId])
 
+  // Pre-warm the opened topic's question buffer (concurrent) so a few questions
+  // are ready before the student reaches the Practice tab.
+  useEffect(() => {
+    if (!ready || !selectedTopicId) return
+    void ensureBufferRef.current(selectedTopicId)
+  }, [ready, selectedTopicId])
+
   const requestSurface = useCallback((slide: KeySlide, topicTitle: string, force?: boolean) => {
     // Auto-expand the reference pane so the surfaced slide is visible.
     setRefCollapsed(false)
@@ -354,11 +525,14 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     setProgress(new Map())
     retryQueueRef.current = []
     sessionTurnCountRef.current = 0
-    pendingQRef.current.clear()
+    qStoreRef.current.clear()
     setTargetQuestion(null)
   }, [session])
 
   const selectedTopic = topics.find((t) => t.id === selectedTopicId) ?? null
+  const masteredCount = topics.filter(
+    (t) => progress.get(t.id)?.status === 'mastered',
+  ).length
   const selectedOverview = useMemo(
     () => parseOverview(selectedTopic ? progress.get(selectedTopic.id)?.overview : undefined),
     [selectedTopic, progress],
@@ -386,6 +560,11 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
             {selectedTopic ? '← Curriculum' : '← All preps'}
           </button>
           <span className="prep-study-title">{session.title}</span>
+          <span className="prep-chip acc">
+            {selectedTopic
+              ? `${progress.get(selectedTopic.id)?.masteryAccumulated ?? 0} / ${selectedTopic.masteryThreshold} pts`
+              : `${masteredCount} / ${topics.length} mastered`}
+          </span>
           {refCollapsed ? (
             <button
               type="button"
@@ -418,14 +597,18 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
             targetKcLabel={targetQuestion?.topicId === selectedTopic.id ? targetQuestion.targetKcLabel : undefined}
             onRequestNext={handleNextQuestion}
             onOpenChat={openChat}
-            cachedQuestion={pendingQRef.current.get(selectedTopic.id) ?? null}
-            onCacheQuestion={(q) => pendingQRef.current.set(selectedTopic.id, q)}
+            cachedQuestion={qStoreRef.current.get(selectedTopic.id)?.current ?? null}
+            onTakeQuestion={takeQuestion}
+            onAdvanceQuestion={advanceQuestion}
+            onSetCurrentQuestion={setCurrentQuestion}
+            onPrimeQuestions={(id) => void ensureBufferRef.current(id)}
           />
         ) : (
           <CurriculumMap
             topics={topics}
             progress={progress}
             difficulty={session.difficulty}
+            title={session.title}
             onSelect={(id) => {
               setSelectedTopicId(id)
               setTargetQuestion(null)

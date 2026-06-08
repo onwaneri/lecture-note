@@ -26,6 +26,7 @@ import {
   uploadBytes,
 } from 'firebase/storage'
 import { getDb, getFirebaseStorage, requireUid } from './firebase'
+import type { GeneratedQuestion } from './testPrep'
 import {
   cacheDeletePDF,
   cacheDeleteThumb,
@@ -249,6 +250,9 @@ export interface PrepTopicProgressRecord {
   overview?: string
   /** Per-KC mastery tracking. */
   kcMastery?: Record<string, KCMasteryRecord>
+  /** Pre-generated unanswered questions (index 0 = current displayed, rest =
+   * upcoming buffer) so they survive a full prep exit / reload. */
+  pendingQuestions?: GeneratedQuestion[]
 }
 
 /** Item in the retry queue — a failed concept to re-test after a delay. */
