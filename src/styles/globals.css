@@ -2574,23 +2574,6 @@ button:disabled {
   opacity: 0.8;
 }
 
-/* ── KC dots in CurriculumMap ────────────────────────── */
-.prep-kc-dots {
-  display: flex;
-  gap: 6px;
-  margin: 8px 0 6px;
-}
-.prep-kc-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: color-mix(in srgb, var(--ate-ink) 25%, var(--ate-bg-2));
-  transition: background 0.25s ease;
-}
-.prep-kc-dot.met {
-  background: #2e7d4f;
-}
-
 /* ── Reset progress button ───────────────────────────── */
 .prep-map-reset {
   margin-top: 24px;
@@ -3660,13 +3643,11 @@ button:disabled {
 .prep-topic-name { font-size: 14px; font-weight: 600; color: var(--ate-ink); margin-bottom: 2px; }
 .prep-topic-row.mastered .prep-topic-name { color: var(--ate-green); }
 .prep-topic-sum { font-size: 12px; color: var(--ate-muted); line-height: 1.4; }
-.prep-kc-dots { display: flex; gap: 4px; align-items: center; flex-shrink: 0; }
-.prep-kc-dot { width: 6px; height: 6px; border-radius: 999px; border: 1.5px solid var(--ate-rule-2); background: transparent; }
-.prep-kc-dot.met { background: var(--ate-accent); border-color: var(--ate-accent); }
-.prep-topic-prog { flex-shrink: 0; width: 90px; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
-.prep-mini-bar { width: 100%; height: 3px; background: var(--ate-rule); border-radius: 999px; overflow: hidden; }
-.prep-mini-fill { height: 100%; background: var(--ate-accent); border-radius: 999px; }
-.prep-mini-fill.done { background: var(--ate-green); }
+.prep-topic-prog { flex-shrink: 0; display: flex; flex-direction: column; align-items: flex-end; gap: 5px; }
+.prep-mastery-dots { display: flex; gap: 4px; align-items: center; }
+.prep-mastery-dot { width: 8px; height: 8px; border-radius: 999px; border: 1.5px solid var(--ate-rule-2); background: transparent; transition: background 0.15s ease, border-color 0.15s ease; }
+.prep-mastery-dot.filled { background: var(--ate-accent); border-color: var(--ate-accent); }
+.prep-mastery-dot.done { background: var(--ate-green); border-color: var(--ate-green); }
 .prep-topic-pts { font-family: var(--font-mono); font-size: 10px; color: var(--ate-muted); }
 .prep-topic-pts.done { color: var(--ate-green); font-weight: 600; }
 .prep-topic-pts.new { color: var(--ate-faint); }

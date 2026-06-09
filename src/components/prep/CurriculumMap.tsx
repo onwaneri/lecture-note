@@ -1,7 +1,7 @@
 import { useState } from 'react'
-import { ensureKCs, MASTERY_CONFIGS, type PrepDifficulty } from '../../lib/db'
 import type {
   CurriculumTopic,
+  PrepDifficulty,
   PrepTopicProgressRecord,
 } from '../../lib/db'
 
@@ -18,14 +18,13 @@ interface CurriculumMapProps {
 export function CurriculumMap({
   topics,
   progress,
-  difficulty,
+  difficulty: _difficulty,
   title,
   onSelect,
   onResetProgress,
 }: CurriculumMapProps) {
   const [confirmReset, setConfirmReset] = useState(false)
   const [resetting, setResetting] = useState(false)
-  const config = MASTERY_CONFIGS[difficulty]
   const masteredCount = topics.filter(
     (t) => progress.get(t.id)?.status === 'mastered',
   ).length
@@ -50,12 +49,8 @@ export function CurriculumMap({
         const rec = progress.get(t.id)
         const accumulated = rec?.masteryAccumulated ?? 0
         const mastered = rec?.status === 'mastered'
-        const pct = Math.min(
-          100,
-          Math.round((accumulated / t.masteryThreshold) * 100),
-        )
-        const kcs = ensureKCs(t)
-        const kcMastery = rec?.kcMastery ?? {}
+        const threshold = t.masteryThreshold
+        const filledDots = Math.min(threshold, Math.floor(accumulated))
         return (
           <div
             key={t.id}
@@ -73,31 +68,15 @@ export function CurriculumMap({
                 <div className="prep-topic-sum">{t.summary}</div>
               ) : null}
             </div>
-            {kcs.length > 1 ? (
-              <div className="prep-kc-dots">
-                {kcs.map((kc) => {
-                  const m = kcMastery[kc.id]
-                  const attempts = m?.attempts ?? 0
-                  const avg = attempts > 0 ? m!.totalScore / attempts : 0
-                  const met =
-                    attempts >= config.minKCAttempts &&
-                    (config.minKCAvgScore == null || avg >= config.minKCAvgScore)
-                  return (
-                    <span
-                      key={kc.id}
-                      className={`prep-kc-dot ${met ? 'met' : ''}`}
-                      title={`${kc.label}${m ? ` · ${m.attempts} attempt${m.attempts !== 1 ? 's' : ''} · avg ${Math.round(avg * 100)}%` : ''}`}
-                    />
-                  )
-                })}
-              </div>
-            ) : null}
             <div className="prep-topic-prog">
-              <div className="prep-mini-bar">
-                <div
-                  className={`prep-mini-fill${mastered ? ' done' : ''}`}
-                  style={{ width: `${pct}%` }}
-                />
+              <div className="prep-mastery-dots">
+                {Array.from({ length: threshold }, (_, i) => (
+                  <span
+                    key={i}
+                    className={`prep-mastery-dot${i < filledDots ? ' filled' : ''}${mastered ? ' done' : ''}`}
+                    title={`${i + 1} / ${threshold} pts`}
+                  />
+                ))}
               </div>
               <div
                 className={`prep-topic-pts${mastered ? ' done' : accumulated === 0 ? ' new' : ''}`}
@@ -106,7 +85,7 @@ export function CurriculumMap({
                   ? '✓ Mastered'
                   : accumulated === 0
                     ? 'Not started'
-                    : `${accumulated} / ${t.masteryThreshold} pts`}
+                    : `${accumulated} / ${threshold} pts`}
               </div>
             </div>
           </div>
