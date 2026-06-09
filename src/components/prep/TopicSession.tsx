@@ -30,6 +30,40 @@ function docName(documents: PrepSessionRecord['documents'], filename: string): s
 
 const CHOICE_LABELS = ['A', 'B', 'C', 'D']
 
+const LEVEL_INFO: { label: string; mult: string }[] = [
+  { label: 'Recall', mult: '0 pts' },
+  { label: 'Simple', mult: '0.5x' },
+  { label: 'Conceptual', mult: '0.75x' },
+  { label: 'Multi-step', mult: '1x' },
+  { label: 'Synthesis', mult: '1x' },
+]
+
+/** Level chip with a hover tooltip showing the scoring chart. */
+function LevelChip({ level }: { level: number }) {
+  return (
+    <span className="prep-level-chip-wrap">
+      <span className="prep-difficulty-level">LV {level}</span>
+      <div className="prep-level-tooltip">
+        <div className="prep-level-tooltip-title">Point multipliers</div>
+        <table className="prep-level-tooltip-table">
+          <tbody>
+            {LEVEL_INFO.map((info, i) => {
+              const lv = i + 1
+              return (
+                <tr key={lv} className={lv === level ? 'current' : ''}>
+                  <td className="prep-level-tooltip-lv">{lv}</td>
+                  <td className="prep-level-tooltip-label">{info.label}</td>
+                  <td className="prep-level-tooltip-mult">{info.mult}</td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
+      </div>
+    </span>
+  )
+}
+
 /** Reusable citation chip that surfaces a slide in the reference pane. */
 function CitationChip({
   slide,
@@ -589,7 +623,7 @@ function DifficultyNudge({
       >
         ▼
       </button>
-      <span className="prep-difficulty-level">LV {currentLevel}</span>
+      <LevelChip level={currentLevel} />
       <button
         type="button"
         className={`prep-difficulty-arrow ${nudge === 1 ? 'active' : ''}`}
@@ -621,7 +655,7 @@ function MasteryDifficultyPicker({
   }
   return (
     <div className="prep-difficulty-adjuster">
-      <span className="prep-difficulty-level">LV</span>
+      <LevelChip level={currentLevel} />
       {[1, 2, 3, 4, 5].map((level) => (
         <button
           key={level}
@@ -799,9 +833,7 @@ function PracticeView({
               />
             ) : (
               effectiveLevel ? (
-                <span className="prep-chip" title="Current difficulty">
-                  Lv {effectiveLevel}
-                </span>
+                <LevelChip level={effectiveLevel} />
               ) : null
             )}
             <button
@@ -932,9 +964,7 @@ function ReviewTurn({
       <div className="prep-q-meta">
         <span className="prep-eyebrow">Question</span>
         {turn.difficultyLevel ? (
-          <span className="prep-chip" title="Difficulty level">
-            Lv {turn.difficultyLevel}
-          </span>
+          <LevelChip level={turn.difficultyLevel} />
         ) : null}
         {turn.hintUsed ? (
           <span className="prep-hint-used-badge">Hint used</span>

@@ -3859,6 +3859,11 @@ button:disabled {
   opacity: 0.35;
   cursor: not-allowed;
 }
+.prep-level-chip-wrap {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
 .prep-difficulty-level {
   font-family: var(--font-mono);
   font-size: 10px;
@@ -3868,6 +3873,62 @@ button:disabled {
   font-weight: 600;
   min-width: 36px;
   text-align: center;
+  cursor: default;
+}
+.prep-level-tooltip {
+  display: none;
+  position: absolute;
+  bottom: calc(100% + 8px);
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--ate-surface);
+  border: 1px solid var(--ate-rule);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0,0,0,0.12), 0 2px 6px rgba(0,0,0,0.06);
+  padding: 10px 12px;
+  z-index: 20;
+  white-space: nowrap;
+  pointer-events: none;
+}
+.prep-level-chip-wrap:hover .prep-level-tooltip { display: block; }
+.prep-level-tooltip-title {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ate-muted);
+  margin-bottom: 6px;
+}
+.prep-level-tooltip-table {
+  border-collapse: collapse;
+  width: 100%;
+}
+.prep-level-tooltip-table td {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  color: var(--ate-ink-2);
+  padding: 3px 0;
+}
+.prep-level-tooltip-table tr.current td {
+  color: var(--ate-accent);
+  font-weight: 600;
+}
+.prep-level-tooltip-lv {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  width: 18px;
+  padding-right: 6px;
+}
+.prep-level-tooltip-label {
+  padding-right: 14px;
+}
+.prep-level-tooltip-mult {
+  font-family: var(--font-mono);
+  text-align: right;
+  color: var(--ate-muted);
+}
+.prep-level-tooltip-table tr.current .prep-level-tooltip-mult {
+  color: var(--ate-accent);
 }
 .prep-difficulty-note {
   font-family: var(--font-mono);
