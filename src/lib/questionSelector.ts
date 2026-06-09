@@ -12,6 +12,7 @@ import {
   type PrepDifficulty,
   type PrepTopicProgressRecord,
   type RetryItem,
+  type PrepTurn,
 } from './db'
 
 // ---------------------------------------------------------------------------
@@ -28,6 +29,8 @@ export interface StudyState {
   turnCount: number
   /** The topic the student is currently viewing (for foundational single-topic). */
   currentTopicId?: string
+  /** User-requested difficulty nudge (+1 or -1) applied on top of adaptive. */
+  difficultyNudge?: number
 }
 
 export interface NextQuestion {
@@ -51,6 +54,9 @@ export function selectNextQuestion(state: StudyState): NextQuestion {
 
   const topicProgress = state.progress.get(currentId)
 
+  const nudge = state.difficultyNudge ?? 0
+  const applyNudge = (d: number) => Math.max(1, Math.min(5, d + nudge))
+
   // Retry queue — only process items queued for the current topic.
   if (config.retryEnabled) {
     const retryIdx = state.retryQueue.findIndex(
@@ -60,7 +66,7 @@ export function selectNextQuestion(state: StudyState): NextQuestion {
       const item = state.retryQueue[retryIdx]
       return {
         topicId: currentId,
-        targetDifficulty: adaptiveDifficulty(topic ?? null, topicProgress),
+        targetDifficulty: applyNudge(adaptiveDifficulty(topic ?? null, topicProgress)),
         targetKcId: item.kcId,
         targetKcLabel: item.kcId ? kcLabelById(topic, item.kcId) : undefined,
         reason: 'retry',
@@ -72,7 +78,7 @@ export function selectNextQuestion(state: StudyState): NextQuestion {
   const kc = topic ? pickTargetKC(topic, topicProgress) : undefined
   return {
     topicId: currentId,
-    targetDifficulty: adaptiveDifficulty(topic ?? null, topicProgress),
+    targetDifficulty: applyNudge(adaptiveDifficulty(topic ?? null, topicProgress)),
     targetKcId: kc?.id,
     targetKcLabel: kc?.label,
     reason: 'normal',
@@ -114,7 +120,7 @@ function adaptiveDifficulty(
   progress: PrepTopicProgressRecord | undefined,
 ): number {
   const turns = progress?.turns ?? []
-  if (turns.length === 0) return 2 // start at "simple application"
+  if (turns.length === 0) return 1 // start at recall/definition
 
   const recent = turns.slice(-3)
   const avg = recent.reduce((s, t) => s + t.score, 0) / recent.length
@@ -133,15 +139,90 @@ function adaptiveDifficulty(
 // Mastery check — compound check replacing simple threshold
 // ---------------------------------------------------------------------------
 
+/** Penalty points applied when a student scores exactly 0, by difficulty level. */
+export const WRONG_PENALTIES: Record<number, number> = {
+  1: -0.5,
+  2: -0.4,
+  3: -0.3,
+  4: -0.2,
+  5: -0.1,
+}
+
+/**
+ * Calculates the effective score contribution toward mastery based on difficulty.
+ *
+ * When `rawScore === 0` (completely wrong), a negative penalty is applied that
+ * decreases with difficulty (harder questions penalize less).
+ *
+ * When `rawScore > 0`:
+ *   - Level 1: 0 (doesn't count toward mastery)
+ *   - Level 2: 0.5x
+ *   - Level 3: 0.75x
+ *   - Level 4+: 1x
+ */
+export function calculateMasteryScore(
+  rawScore: number,
+  difficultyLevel: number = 1,
+  penaltiesEnabled: boolean = false,
+): number {
+  // Completely wrong → penalty only for turns created after the refactor
+  // (indicated by penaltiesEnabled). Old turns stay at 0.
+  if (rawScore === 0) {
+    if (!penaltiesEnabled) return 0
+    return WRONG_PENALTIES[Math.max(1, Math.min(5, difficultyLevel))] ?? -0.1
+  }
+  if (difficultyLevel < 2) {
+    return 0 // Level 1 questions don't count toward mastery
+  }
+  if (difficultyLevel === 2) {
+    return rawScore * 0.5
+  }
+  if (difficultyLevel === 3) {
+    return rawScore * 0.75
+  }
+  return rawScore // Level 4+ worth full points
+}
+
+/**
+ * Halves the raw score when the student used a hint. Apply this BEFORE
+ * feeding the score into `calculateMasteryScore`.
+ */
+export function applyHintPenalty(score: number, hintUsed: boolean): number {
+  return hintUsed ? score * 0.5 : score
+}
+
+/**
+ * Filters turns to only include those that count toward mastery (level 2+).
+ */
+export function filterMasteryTurns(turns: PrepTurn[]): PrepTurn[] {
+  return turns.filter((t) => (t.difficultyLevel ?? 1) >= 2)
+}
+
+/**
+ * Calculates the total mastery points from a turn history,
+ * applying difficulty-based scoring rules. Clamped to ≥ 0.
+ *
+ * Wrong-answer penalties only apply to turns created after the refactor
+ * (identified by having `hintUsed` defined on the turn record).
+ */
+export function calculateTotalMasteryPoints(turns: PrepTurn[]): number {
+  const raw = turns.reduce((sum, turn) => {
+    const penaltiesEnabled = turn.hintUsed !== undefined
+    return sum + calculateMasteryScore(turn.score, turn.difficultyLevel ?? 1, penaltiesEnabled)
+  }, 0)
+  return Math.max(0, raw)
+}
+
 export function canMarkMastered(
   topic: CurriculumTopic,
   progress: PrepTopicProgressRecord,
   config: MasteryConfig,
 ): boolean {
-  // 1. Point threshold
-  if (progress.masteryAccumulated < config.pointThreshold) return false
+  // 1. Point threshold — only using level 2+ questions
+  const masteryPoints = calculateTotalMasteryPoints(progress.turns)
+  if (masteryPoints < config.pointThreshold) return false
 
-  // 2. KC coverage
+  // 2. KC coverage — only count attempts/scores from level 2+ questions
   const kcs = ensureKCs(topic)
   for (const kc of kcs) {
     const m = progress.kcMastery?.[kc.id]
@@ -154,9 +235,9 @@ export function canMarkMastered(
     }
   }
 
-  // 3. Depth — at least one question at the required difficulty.
+  // 3. Depth — at least one question at the required difficulty (level 2+).
   if (config.minDifficultyReached != null) {
-    const hasDepth = progress.turns.some(
+    const hasDepth = filterMasteryTurns(progress.turns).some(
       (t) => (t.difficultyLevel ?? 1) >= config.minDifficultyReached!,
     )
     if (!hasDepth) return false

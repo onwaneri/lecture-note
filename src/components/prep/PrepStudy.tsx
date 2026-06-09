@@ -24,9 +24,16 @@ import {
   canMarkMastered,
   onAnswerGraded,
   selectNextQuestion,
+  calculateTotalMasteryPoints,
   type NextQuestion,
 } from '../../lib/questionSelector'
-import { createDocumentCache, generateOverview, generateQuestion, type GeneratedQuestion, type TopicOverview } from '../../lib/testPrep'
+import {
+  generateOverview,
+  generateQuestionBlock,
+  type GeneratedQuestion,
+  type QuestionBlock,
+  type TopicOverview,
+} from '../../lib/testPrep'
 import { usePrepDocs } from '../../hooks/usePrepDocs'
 import { CurriculumMap } from './CurriculumMap'
 import { TopicSession } from './TopicSession'
@@ -57,6 +64,26 @@ function parseOverview(raw: string | undefined): TopicOverview | null {
   }
 }
 
+/** Per-topic block buffer state. */
+interface BlockSlot {
+  currentBlock: QuestionBlock | null
+  currentIndex: number // 0, 1, or 2 within block
+  nextBlock: QuestionBlock | null
+  nextBlockGenerating: boolean
+  /** Sequential counter for block indices. */
+  blockCounter: number
+}
+
+function emptyBlockSlot(): BlockSlot {
+  return {
+    currentBlock: null,
+    currentIndex: 0,
+    nextBlock: null,
+    nextBlockGenerating: false,
+    blockCounter: 0,
+  }
+}
+
 export function PrepStudy({ session, onExit }: PrepStudyProps) {
   const [progress, setProgress] = useState<
     Map<string, PrepTopicProgressRecord>
@@ -69,7 +96,8 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
   const studyRef = useRef<HTMLDivElement | null>(null)
   const prepDocs = usePrepDocs()
 
-  // Background overview generation state (per topic).
+  // Overview error recovery — overviews are now generated during init
+  // (PrepProcessing), but we keep a simple retry mechanism for error cases.
   const [overviewLoadingIds, setOverviewLoadingIds] = useState<Set<string>>(
     new Set(),
   )
@@ -77,6 +105,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     new Map(),
   )
   const overviewInFlight = useRef<Set<string>>(new Set())
+
   // Latest progress, readable inside async generation without stale closures.
   const progressRef = useRef(progress)
   progressRef.current = progress
@@ -86,37 +115,37 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
   const sessionTurnCountRef = useRef(0)
   const [targetQuestion, setTargetQuestion] = useState<NextQuestion | null>(null)
 
-  // Per-topic question buffer — owned here (not in TopicSession) so generation
-  // is pre-warmed concurrently and survives leaving the topic / switching tabs.
-  // `current` = the displayed unanswered question (restored on remount);
-  // `buffer` = a few questions queued ahead so "Next" is instant.
-  const QUESTION_BUFFER = 3
-  const qStoreRef = useRef<
-    Map<string, { current: GeneratedQuestion | null; buffer: GeneratedQuestion[] }>
-  >(new Map())
-  const qFillingRef = useRef<Set<string>>(new Set())
+  // ── Block buffer system ────────────────────────────────
+  // Per-topic block buffer — owned here so generation persists across topic/tab
+  // navigation. Each topic has a current block (3 questions) and a next block
+  // (pre-generated for instant transitions).
+  const blockStoreRef = useRef<Map<string, BlockSlot>>(new Map())
+  const blockGenRef = useRef<Set<string>>(new Set())
 
-  function qSlot(topicId: string) {
-    let s = qStoreRef.current.get(topicId)
+  function blockSlot(topicId: string): BlockSlot {
+    let s = blockStoreRef.current.get(topicId)
     if (!s) {
-      s = { current: null, buffer: [] }
-      qStoreRef.current.set(topicId, s)
+      s = emptyBlockSlot()
+      blockStoreRef.current.set(topicId, s)
     }
     return s
   }
-  /** The topic's persisted pending list: [current?, ...buffer]. */
-  const pendingOf = useCallback(
-    (topicId: string): GeneratedQuestion[] | undefined => {
-      const s = qStoreRef.current.get(topicId)
-      if (!s) return undefined
-      const arr = [...(s.current ? [s.current] : []), ...s.buffer]
-      return arr.length ? arr : undefined
+
+  /** Build the persisted pendingQuestionBlock shape from a slot. */
+  const pendingBlockOf = useCallback(
+    (topicId: string): PrepTopicProgressRecord['pendingQuestionBlock'] => {
+      const s = blockStoreRef.current.get(topicId)
+      if (!s || (!s.currentBlock && !s.nextBlock)) return undefined
+      return {
+        currentBlock: s.currentBlock,
+        currentIndex: s.currentIndex,
+        nextBlock: s.nextBlock,
+      }
     },
     [],
   )
-  // Persist the buffer into the topic's progress record (preserving the rest)
-  // and re-render so `cachedQuestion` re-reads. Mirrors saveOverview's merge so
-  // unanswered questions survive a full prep exit / reload.
+
+  /** Persist the block buffer into the topic's progress record. */
   const syncPending = useCallback(
     (topicId: string) => {
       setProgress((prev) => {
@@ -130,7 +159,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
           turns: existing?.turns ?? [],
           overview: existing?.overview,
           kcMastery: existing?.kcMastery,
-          pendingQuestions: pendingOf(topicId),
+          pendingQuestionBlock: pendingBlockOf(topicId),
         }
         void putTopicProgress(record)
         const next = new Map(prev)
@@ -138,26 +167,13 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
         return next
       })
     },
-    [session.sessionId, pendingOf],
+    [session.sessionId, pendingBlockOf],
   )
 
-  // Server-side document cache (Gemini context caching) — created once per
-  // session, reused across all overview generation calls.
-  const docCacheRef = useRef<string | null>(null)
-  const docCacheInitiated = useRef(false)
-
-  useEffect(() => {
-    if (docCacheInitiated.current) return
-    docCacheInitiated.current = true
-    createDocumentCache(session.documents).then((name) => {
-      if (name) {
-        docCacheRef.current = name
-        console.info('[prep] document cache ready:', name)
-      }
-    }).catch((e) => {
-      console.warn('[prep] document cache creation failed (will use inline)', e)
-    })
-  }, [session.documents])
+  // Per-topic difficulty nudge state (+1 or -1 from user arrows).
+  const [topicDifficultyNudge, setTopicDifficultyNudge] = useState<
+    Record<string, number | null>
+  >({})
 
   // Session-scoped chat state — persists across topics/questions.
   const [chatOpen, setChatOpen] = useState(false)
@@ -189,20 +205,26 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     window.addEventListener('pointerup', onUp)
   }
 
+  // Load persisted progress + restore block buffers on mount.
   useEffect(() => {
     let cancelled = false
     getAllProgressForSession(session.sessionId).then((m) => {
       if (cancelled) return
-      // Restore any persisted unanswered questions into the in-memory buffer so
-      // the student resumes on the same question after a full exit / reload.
+      // Restore persisted block buffers.
       m.forEach((rec, topicId) => {
-        const pending = rec.pendingQuestions
-        if (pending && pending.length) {
-          qStoreRef.current.set(topicId, {
-            current: pending[0],
-            buffer: pending.slice(1),
+        if (rec.pendingQuestionBlock) {
+          const pb = rec.pendingQuestionBlock
+          blockStoreRef.current.set(topicId, {
+            currentBlock: pb.currentBlock,
+            currentIndex: pb.currentIndex,
+            nextBlock: pb.nextBlock,
+            nextBlockGenerating: false,
+            blockCounter:
+              (pb.currentBlock?.blockIndex ?? 0) +
+              (pb.nextBlock ? 2 : 1),
           })
         }
+        // Backward compat: discard old pendingQuestions (don't try to convert).
       })
       setProgress(m)
       setReady(true)
@@ -217,9 +239,10 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     [session.blueprint.topics],
   )
 
-  /** Update KC + difficulty targeting for the current topic (no topic switching). */
+  /** Update KC + difficulty targeting for the current topic. */
   const handleNextQuestion = useCallback(() => {
     if (!selectedTopicId) return
+    const nudge = topicDifficultyNudge[selectedTopicId] ?? undefined
     const next = selectNextQuestion({
       topics,
       progress,
@@ -228,121 +251,286 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
       recentTopicIds: [],
       turnCount: sessionTurnCountRef.current,
       currentTopicId: selectedTopicId,
+      difficultyNudge: nudge ?? undefined,
     })
     setTargetQuestion(next)
-  }, [topics, progress, session.difficulty, selectedTopicId])
+  }, [topics, progress, session.difficulty, selectedTopicId, topicDifficultyNudge])
 
-  // Fill a topic's question buffer concurrently up to QUESTION_BUFFER. Runs here
-  // (not in TopicSession) so it keeps going after the student leaves the topic.
-  const ensureBuffer = useCallback(
-    async (topicId: string) => {
-      if (qFillingRef.current.has(topicId)) return
+  /** Generate a question block for a topic. */
+  const generateBlock = useCallback(
+    async (topicId: string, blockIndex: number): Promise<QuestionBlock | null> => {
       const topic = topics.find((t) => t.id === topicId)
-      if (!topic) return
+      if (!topic) return null
       const rec = progressRef.current.get(topicId)
       const accumulated = rec?.masteryAccumulated ?? 0
-      if (accumulated >= topic.masteryThreshold) return // mastered — stop prefetching
-      const slot = qSlot(topicId)
-      const need = QUESTION_BUFFER - slot.buffer.length
-      if (need <= 0) return
-      qFillingRef.current.add(topicId)
+      const slot = blockSlot(topicId)
+
+      // Collect asked questions for dedup.
+      const asked = [
+        ...(rec?.turns ?? []).map((t) => t.questionText),
+        ...(slot.currentBlock?.questions ?? []).map((q) => q.questionText),
+        ...(slot.nextBlock?.questions ?? []).map((q) => q.questionText),
+      ]
+
+      const nudge = topicDifficultyNudge[topicId] ?? undefined
+      const target = selectNextQuestion({
+        topics,
+        progress: progressRef.current,
+        difficulty: session.difficulty,
+        retryQueue: retryQueueRef.current,
+        recentTopicIds: [],
+        turnCount: sessionTurnCountRef.current,
+        currentTopicId: topicId,
+        difficultyNudge: nudge ?? undefined,
+      })
+      const useTarget = target.topicId === topicId
+
       try {
-        const target = selectNextQuestion({
-          topics,
-          progress: progressRef.current,
+        const block = await generateQuestionBlock({
+          topic,
           difficulty: session.difficulty,
-          retryQueue: retryQueueRef.current,
-          recentTopicIds: [],
-          turnCount: sessionTurnCountRef.current,
-          currentTopicId: topicId,
+          examBlueprint: session.blueprint.examBlueprint,
+          askedQuestions: asked,
+          masteryAccumulated: accumulated,
+          targetDifficulty: useTarget ? target.targetDifficulty : undefined,
+          targetKcId: useTarget ? target.targetKcId : undefined,
+          targetKcLabel: useTarget ? target.targetKcLabel : undefined,
+          blockIndex,
         })
-        // The selector may interleave to another topic; only apply its KC/
-        // difficulty target when it's actually for this topic.
-        const useTarget = target.topicId === topicId
-        const asked = [
-          ...(rec?.turns ?? []).map((t) => t.questionText),
-          ...(slot.current ? [slot.current.questionText] : []),
-          ...slot.buffer.map((q) => q.questionText),
-        ]
-        const generated = await Promise.all(
-          Array.from({ length: need }, () =>
-            generateQuestion({
-              topic,
-              difficulty: session.difficulty,
-              examBlueprint: session.blueprint.examBlueprint,
-              askedQuestions: asked,
-              masteryAccumulated: accumulated,
-              targetDifficulty: useTarget ? target.targetDifficulty : undefined,
-              targetKcId: useTarget ? target.targetKcId : undefined,
-              targetKcLabel: useTarget ? target.targetKcLabel : undefined,
-              preferMC: useTarget && (target.targetDifficulty ?? 2) <= 1,
-            }).catch((e) => {
-              console.warn('[prep] question prefetch failed', e)
-              return null
-            }),
-          ),
-        )
-        // Concurrent gens can collide — dedupe against history + each other.
-        const seen = new Set(asked)
-        for (const q of generated) {
-          if (q && !seen.has(q.questionText)) {
-            seen.add(q.questionText)
-            slot.buffer.push(q)
-          }
-        }
-        syncPending(topicId)
-      } finally {
-        qFillingRef.current.delete(topicId)
+        return block
+      } catch (e) {
+        console.warn('[prep] block generation failed', e)
+        return null
       }
     },
-    [topics, session, syncPending],
+    [topics, session, topicDifficultyNudge],
   )
-  const ensureBufferRef = useRef(ensureBuffer)
-  ensureBufferRef.current = ensureBuffer
 
-  /** Current question for a topic, promoting the next buffered one if needed. */
+  /** Ensure a next block is queued for a topic (called after Q2 answered). */
+  const ensureNextBlock = useCallback(
+    async (topicId: string) => {
+      const key = `${topicId}:next`
+      if (blockGenRef.current.has(key)) return
+      const slot = blockSlot(topicId)
+      if (slot.nextBlock) return
+      if (slot.nextBlockGenerating) return
+      slot.nextBlockGenerating = true
+      blockGenRef.current.add(key)
+      try {
+        const block = await generateBlock(topicId, slot.blockCounter)
+        slot.nextBlock = block
+        if (block) slot.blockCounter++
+        syncPending(topicId)
+      } finally {
+        slot.nextBlockGenerating = false
+        blockGenRef.current.delete(key)
+      }
+    },
+    [generateBlock, syncPending],
+  )
+  const ensureNextBlockRef = useRef(ensureNextBlock)
+  ensureNextBlockRef.current = ensureNextBlock
+
+  /** Generate the first block for a topic (when no current block exists). */
+  const ensureCurrentBlock = useCallback(
+    async (topicId: string) => {
+      const key = `${topicId}:current`
+      if (blockGenRef.current.has(key)) return
+      const slot = blockSlot(topicId)
+      if (slot.currentBlock) return
+      blockGenRef.current.add(key)
+      try {
+        const block = await generateBlock(topicId, slot.blockCounter)
+        slot.currentBlock = block
+        slot.currentIndex = 0
+        if (block) slot.blockCounter++
+        syncPending(topicId)
+        // Start prefetching next block.
+        void ensureNextBlockRef.current(topicId)
+      } finally {
+        blockGenRef.current.delete(key)
+      }
+    },
+    [generateBlock, syncPending],
+  )
+  const ensureCurrentBlockRef = useRef(ensureCurrentBlock)
+  ensureCurrentBlockRef.current = ensureCurrentBlock
+
+  /** Get the current question from the block buffer. */
   const takeQuestion = useCallback(
     (topicId: string): GeneratedQuestion | null => {
-      const slot = qSlot(topicId)
-      if (!slot.current) slot.current = slot.buffer.shift() ?? null
-      syncPending(topicId)
-      void ensureBufferRef.current(topicId)
-      return slot.current
+      const slot = blockSlot(topicId)
+      if (!slot.currentBlock) {
+        // No block yet — trigger generation.
+        void ensureCurrentBlockRef.current(topicId)
+        return null
+      }
+      return slot.currentBlock.questions[slot.currentIndex] ?? null
     },
-    [syncPending],
+    [],
   )
-  /** Discard the current (answered) question and promote the next buffered one. */
+
+  /** Advance to the next question (within block or promote next block). */
   const advanceQuestion = useCallback(
     (topicId: string): GeneratedQuestion | null => {
-      const slot = qSlot(topicId)
-      slot.current = slot.buffer.shift() ?? null
+      const slot = blockSlot(topicId)
+      if (!slot.currentBlock) return null
+
+      const nextIdx = slot.currentIndex + 1
+      if (nextIdx < slot.currentBlock.questions.length) {
+        // Next question within the same block.
+        slot.currentIndex = nextIdx
+        // After Q2 (index 2), pre-generate next block.
+        if (nextIdx >= 2) void ensureNextBlockRef.current(topicId)
+        syncPending(topicId)
+        return slot.currentBlock.questions[nextIdx] ?? null
+      }
+
+      // Block exhausted — promote next block.
+      if (slot.nextBlock) {
+        slot.currentBlock = slot.nextBlock
+        slot.currentIndex = 0
+        slot.nextBlock = null
+        slot.nextBlockGenerating = false
+        syncPending(topicId)
+        // Start generating the next next block.
+        void ensureNextBlockRef.current(topicId)
+        return slot.currentBlock.questions[0] ?? null
+      }
+
+      // No next block ready — trigger generation.
+      slot.currentBlock = null
+      slot.currentIndex = 0
       syncPending(topicId)
-      void ensureBufferRef.current(topicId)
-      return slot.current
+      void ensureCurrentBlockRef.current(topicId)
+      return null
     },
     [syncPending],
   )
-  /** Store an on-demand-generated question as the current (buffer-empty fallback). */
+
+  /** Store an on-demand-generated question as a single-question block. */
   const setCurrentQuestion = useCallback(
     (topicId: string, q: GeneratedQuestion | null) => {
-      qSlot(topicId).current = q
+      if (!q) return
+      const slot = blockSlot(topicId)
+      slot.currentBlock = {
+        questions: [q],
+        blockDifficulty: q.difficultyLevel,
+        blockIndex: slot.blockCounter++,
+      }
+      slot.currentIndex = 0
       syncPending(topicId)
     },
     [syncPending],
+  )
+
+  /** Nudge the difficulty for the next block and regenerate. */
+  const nudgeDifficulty = useCallback(
+    (topicId: string, delta: 1 | -1) => {
+      setTopicDifficultyNudge((prev) => ({
+        ...prev,
+        [topicId]: delta,
+      }))
+      // Discard current + next block, regenerate at nudged level.
+      const slot = blockSlot(topicId)
+      slot.currentBlock = null
+      slot.currentIndex = 0
+      slot.nextBlock = null
+      slot.nextBlockGenerating = false
+      syncPending(topicId)
+      // Generation will pick up the nudge from topicDifficultyNudge state.
+      // Use a microtask so the nudge state is set before generation reads it.
+      queueMicrotask(() => void ensureCurrentBlockRef.current(topicId))
+    },
+    [syncPending],
+  )
+
+  /** Get the current block's difficulty level (for display). */
+  const currentBlockDifficulty = useCallback(
+    (topicId: string): number | null => {
+      const slot = blockStoreRef.current.get(topicId)
+      return slot?.currentBlock?.blockDifficulty ?? null
+    },
+    [],
+  )
+
+  /** Clear the difficulty nudge for a topic (deselect arrow). */
+  const clearNudge = useCallback(
+    (topicId: string) => {
+      setTopicDifficultyNudge((prev) => {
+        if (prev[topicId] == null) return prev
+        const next = { ...prev }
+        delete next[topicId]
+        return next
+      })
+    },
+    [],
+  )
+
+  /** Post-mastery: set an exact difficulty and generate a single question. */
+  const setMasteryDifficulty = useCallback(
+    (topicId: string, level: number) => {
+      const topic = topics.find((t) => t.id === topicId)
+      if (!topic) return
+      // Discard any existing block buffer.
+      const slot = blockSlot(topicId)
+      slot.currentBlock = null
+      slot.currentIndex = 0
+      slot.nextBlock = null
+      slot.nextBlockGenerating = false
+      syncPending(topicId)
+
+      // Generate a single question at the exact level (not a block).
+      const rec = progressRef.current.get(topicId)
+      const asked = (rec?.turns ?? []).map((t) => t.questionText)
+      const target = selectNextQuestion({
+        topics,
+        progress: progressRef.current,
+        difficulty: session.difficulty,
+        retryQueue: retryQueueRef.current,
+        recentTopicIds: [],
+        turnCount: sessionTurnCountRef.current,
+        currentTopicId: topicId,
+      })
+      const useTarget = target.topicId === topicId
+
+      void (async () => {
+        try {
+          const { generateQuestion } = await import('../../lib/testPrep')
+          const q = await generateQuestion({
+            topic,
+            difficulty: session.difficulty,
+            examBlueprint: session.blueprint.examBlueprint,
+            askedQuestions: asked,
+            masteryAccumulated: rec?.masteryAccumulated ?? 0,
+            targetDifficulty: level,
+            targetKcId: useTarget ? target.targetKcId : undefined,
+            targetKcLabel: useTarget ? target.targetKcLabel : undefined,
+            preferMC: level <= 2,
+          })
+          // Store as a single-question block.
+          slot.currentBlock = {
+            questions: [q],
+            blockDifficulty: level,
+            blockIndex: slot.blockCounter++,
+          }
+          slot.currentIndex = 0
+          syncPending(topicId)
+        } catch (e) {
+          console.warn('[prep] mastery single-question gen failed', e)
+        }
+      })()
+    },
+    [topics, session, syncPending],
   )
 
   const recordTurn = useCallback(
     async (topicId: string, turn: PrepTurn) => {
-      // Question was answered — drop the current so a remount shows a fresh one;
-      // the buffer already holds the next (refilled here for the latest target).
-      qSlot(topicId).current = null
-      void ensureBufferRef.current(topicId)
-
+      // Question was answered — clear the current question index
+      // so a remount sees a fresh one from advanceQuestion.
       const topic = topics.find((t) => t.id === topicId)
       if (!topic) return
 
-      // Read from ref (not closure) so we always see the latest state,
-      // even if two turns are submitted before React re-renders.
       const existing = progressRef.current.get(topicId)
 
       // Post-answer hook: update retry queue + KC mastery.
@@ -357,29 +545,42 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
       retryQueueRef.current = postResult.retryQueue
       sessionTurnCountRef.current++
 
-      // Build the record inside setProgress so we merge with the true
-      // latest state — prevents saveOverview or a concurrent recordTurn
-      // from clobbering our update.
+      // Clear nudge after the block containing this question finishes.
+      const slot = blockSlot(topicId)
+      if (slot.currentIndex >= (slot.currentBlock?.questions.length ?? 3) - 1) {
+        setTopicDifficultyNudge((prev) => {
+          if (prev[topicId] == null) return prev
+          const next = { ...prev }
+          delete next[topicId]
+          return next
+        })
+      }
+
       setProgress((prev) => {
         const latest = prev.get(topicId)
-        const accumulated = Math.min(
-          topic.masteryThreshold,
-          (latest?.masteryAccumulated ?? 0) + turn.score,
-        )
+        const alreadyMastered = latest?.status === 'mastered'
+        const turns = [...(latest?.turns ?? []), turn]
+        // Once mastered, freeze points — post-mastery practice is for learning,
+        // not for changing the score.
+        const accumulated = alreadyMastered
+          ? (latest?.masteryAccumulated ?? 0)
+          : Math.min(topic.masteryThreshold, calculateTotalMasteryPoints(turns))
         const updatedRecord: PrepTopicProgressRecord = {
           key: progressKey(session.sessionId, topicId),
           sessionId: session.sessionId,
           topicId,
-          status: 'unlocked',
+          status: alreadyMastered ? 'mastered' : 'unlocked',
           masteryAccumulated: accumulated,
-          turns: [...(latest?.turns ?? []), turn],
+          turns,
           overview: latest?.overview,
           kcMastery: postResult.kcMastery,
-          pendingQuestions: pendingOf(topicId),
+          pendingQuestionBlock: pendingBlockOf(topicId),
         }
-        updatedRecord.status = canMarkMastered(topic, updatedRecord, config)
-          ? 'mastered'
-          : 'unlocked'
+        if (!alreadyMastered) {
+          updatedRecord.status = canMarkMastered(topic, updatedRecord, config)
+            ? 'mastered'
+            : 'unlocked'
+        }
 
         void putTopicProgress(updatedRecord)
 
@@ -395,45 +596,13 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
         return next
       })
     },
-    [session, topics, config],
+    [session, topics, config, pendingBlockOf],
   )
 
-  // Persist a topic's teaching overview, preserving any other progress fields.
-  // Reads the latest progress via ref so background generation never clobbers a
-  // concurrently-recorded turn.
-  const saveOverview = useCallback(
-    async (topicId: string, overview: string) => {
-      // Build the record inside setProgress so we merge with the true
-      // latest state — a concurrent recordTurn may have updated points
-      // between when the overview started generating and when it finished.
-      setProgress((prev) => {
-        const existing = prev.get(topicId)
-        const record: PrepTopicProgressRecord = {
-          key: progressKey(session.sessionId, topicId),
-          sessionId: session.sessionId,
-          topicId,
-          status: existing?.status ?? 'unlocked',
-          masteryAccumulated: existing?.masteryAccumulated ?? 0,
-          turns: existing?.turns ?? [],
-          overview,
-          kcMastery: existing?.kcMastery,
-          pendingQuestions: pendingOf(topicId),
-        }
-        void putTopicProgress(record)
-        const next = new Map(prev)
-        next.set(topicId, record)
-        return next
-      })
-    },
-    [session.sessionId],
-  )
-
-  // Generate + persist a topic's overview if it doesn't already have one.
-  // Guards against duplicate concurrent runs for the same topic.
-  const ensureOverview = useCallback(
+  // Overview error recovery — re-generate a single overview on demand.
+  const retryOverview = useCallback(
     async (topicId: string) => {
       if (overviewInFlight.current.has(topicId)) return
-      if (progressRef.current.get(topicId)?.overview) return
       const topic = topics.find((t) => t.id === topicId)
       if (!topic) return
       overviewInFlight.current.add(topicId)
@@ -450,11 +619,28 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
           difficulty: session.difficulty,
           examBlueprint: session.blueprint.examBlueprint,
           documents: session.documents,
-          cachedContent: docCacheRef.current ?? undefined,
         })
-        await saveOverview(topicId, JSON.stringify(ov))
+        // Persist overview into progress.
+        setProgress((prev) => {
+          const existing = prev.get(topicId)
+          const record: PrepTopicProgressRecord = {
+            key: progressKey(session.sessionId, topicId),
+            sessionId: session.sessionId,
+            topicId,
+            status: existing?.status ?? 'unlocked',
+            masteryAccumulated: existing?.masteryAccumulated ?? 0,
+            turns: existing?.turns ?? [],
+            overview: JSON.stringify(ov),
+            kcMastery: existing?.kcMastery,
+            pendingQuestionBlock: pendingBlockOf(topicId),
+          }
+          void putTopicProgress(record)
+          const next = new Map(prev)
+          next.set(topicId, record)
+          return next
+        })
       } catch (e) {
-        console.error('overview generation failed', topic.title, e)
+        console.error('overview retry failed', topic.title, e)
         setOverviewErrors((prev) =>
           new Map(prev).set(
             topicId,
@@ -470,50 +656,20 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
         })
       }
     },
-    [topics, session, saveOverview],
+    [topics, session, pendingBlockOf],
   )
 
-  // Background prefetch: once progress is loaded, generate overviews for every
-  // topic that lacks one — sequentially, so they're ready before the student
-  // opens each topic instead of waiting on entry.
-  const ensureOverviewRef = useRef(ensureOverview)
-  ensureOverviewRef.current = ensureOverview
-  useEffect(() => {
-    if (!ready) return
-    let cancelled = false
-    ;(async () => {
-      for (const t of topics) {
-        if (cancelled) return
-        if (progressRef.current.get(t.id)?.overview) continue
-        await ensureOverviewRef.current(t.id)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [ready, topics])
-
-  // Prioritise the topic the student just opened — jump it ahead of the queue.
+  // Pre-warm the opened topic's block buffer so questions are ready by Practice.
   useEffect(() => {
     if (!ready || !selectedTopicId) return
-    if (progressRef.current.get(selectedTopicId)?.overview) return
-    void ensureOverviewRef.current(selectedTopicId)
-  }, [ready, selectedTopicId])
-
-  // Pre-warm the opened topic's question buffer (concurrent) so a few questions
-  // are ready before the student reaches the Practice tab.
-  useEffect(() => {
-    if (!ready || !selectedTopicId) return
-    void ensureBufferRef.current(selectedTopicId)
+    void ensureCurrentBlockRef.current(selectedTopicId)
   }, [ready, selectedTopicId])
 
   const requestSurface = useCallback((slide: KeySlide, topicTitle: string, force?: boolean) => {
-    // Auto-expand the reference pane so the surfaced slide is visible.
     setRefCollapsed(false)
     setSurface({ slide, topicTitle, nonce: Date.now(), force })
   }, [])
 
-  /** Open the chat popup with updated context. */
   const openChat = useCallback((ctx: PrepChatContext) => {
     setChatContext(ctx)
     setChatOpen(true)
@@ -525,8 +681,9 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
     setProgress(new Map())
     retryQueueRef.current = []
     sessionTurnCountRef.current = 0
-    qStoreRef.current.clear()
+    blockStoreRef.current.clear()
     setTargetQuestion(null)
+    setTopicDifficultyNudge({})
   }, [session])
 
   const selectedTopic = topics.find((t) => t.id === selectedTopicId) ?? null
@@ -588,7 +745,7 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
             overview={selectedOverview}
             overviewLoading={overviewLoadingIds.has(selectedTopic.id)}
             overviewError={overviewErrors.get(selectedTopic.id) ?? null}
-            onRetryOverview={() => void ensureOverview(selectedTopic.id)}
+            onRetryOverview={() => void retryOverview(selectedTopic.id)}
             onSurfaceSlide={(slide, force) =>
               requestSurface(slide, selectedTopic.title, force)
             }
@@ -597,11 +754,21 @@ export function PrepStudy({ session, onExit }: PrepStudyProps) {
             targetKcLabel={targetQuestion?.topicId === selectedTopic.id ? targetQuestion.targetKcLabel : undefined}
             onRequestNext={handleNextQuestion}
             onOpenChat={openChat}
-            cachedQuestion={qStoreRef.current.get(selectedTopic.id)?.current ?? null}
+            cachedQuestion={
+              (() => {
+                const slot = blockStoreRef.current.get(selectedTopic.id)
+                return slot?.currentBlock?.questions[slot.currentIndex] ?? null
+              })()
+            }
             onTakeQuestion={takeQuestion}
             onAdvanceQuestion={advanceQuestion}
             onSetCurrentQuestion={setCurrentQuestion}
-            onPrimeQuestions={(id) => void ensureBufferRef.current(id)}
+            onPrimeQuestions={(id) => void ensureCurrentBlockRef.current(id)}
+            currentBlockDifficulty={currentBlockDifficulty(selectedTopic.id)}
+            onNudgeDifficulty={(delta) => nudgeDifficulty(selectedTopic.id, delta)}
+            onClearNudge={() => clearNudge(selectedTopic.id)}
+            difficultyNudge={topicDifficultyNudge[selectedTopic.id] ?? null}
+            onSetDifficulty={(level) => setMasteryDifficulty(selectedTopic.id, level)}
           />
         ) : (
           <CurriculumMap

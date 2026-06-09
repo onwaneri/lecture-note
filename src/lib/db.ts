@@ -26,7 +26,7 @@ import {
   uploadBytes,
 } from 'firebase/storage'
 import { getDb, getFirebaseStorage, requireUid } from './firebase'
-import type { GeneratedQuestion } from './testPrep'
+import type { GeneratedQuestion, QuestionBlock } from './testPrep'
 import {
   cacheDeletePDF,
   cacheDeleteThumb,
@@ -231,6 +231,12 @@ export interface PrepTurn {
   mcCorrectIndex?: number
   /** What the student picked (if mc). */
   mcSelectedIndex?: number
+  /** Whether the student revealed the hint before answering. */
+  hintUsed?: boolean
+  /** Persisted hint text (from the generated question). */
+  hint?: string
+  /** Persisted hint slide reference. */
+  hintSlide?: KeySlide
 }
 
 export interface KCMasteryRecord {
@@ -250,8 +256,13 @@ export interface PrepTopicProgressRecord {
   overview?: string
   /** Per-KC mastery tracking. */
   kcMastery?: Record<string, KCMasteryRecord>
-  /** Pre-generated unanswered questions (index 0 = current displayed, rest =
-   * upcoming buffer) so they survive a full prep exit / reload. */
+  /** Block-based pending question buffer (replaces pendingQuestions). */
+  pendingQuestionBlock?: {
+    currentBlock: QuestionBlock | null
+    currentIndex: number
+    nextBlock: QuestionBlock | null
+  }
+  /** @deprecated Legacy individual question buffer — read for backward compat, never written. */
   pendingQuestions?: GeneratedQuestion[]
 }
 

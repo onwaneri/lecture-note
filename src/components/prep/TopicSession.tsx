@@ -15,6 +15,7 @@ import {
   type GradeResult,
   type TopicOverview,
 } from '../../lib/testPrep'
+import { applyHintPenalty } from '../../lib/questionSelector'
 import type { PrepChatContext } from './PrepChatPopup'
 
 marked.setOptions({ breaks: true, gfm: true })
@@ -34,10 +35,12 @@ function CitationChip({
   slide,
   documents,
   onSurfaceSlide,
+  label,
 }: {
   slide: KeySlide
   documents: PrepSessionRecord['documents']
   onSurfaceSlide: (slide: KeySlide, force?: boolean) => void
+  label?: string
 }) {
   return (
     <button
@@ -47,7 +50,7 @@ function CitationChip({
       title="Jump to this slide in the reference pane"
     >
       <span className="prep-cite-icon" aria-hidden="true">▦</span>
-      {docName(documents, slide.filename)} · slide {slide.slideIndex + 1}
+      {label ? `${label}: ` : ''}{docName(documents, slide.filename)} · slide {slide.slideIndex + 1}
     </button>
   )
 }
@@ -57,7 +60,7 @@ interface TopicSessionProps {
   topic: CurriculumTopic
   progress: PrepTopicProgressRecord | null
   onRecordTurn: (turn: PrepTurn) => void
-  /** Cited teaching overview (generated + cached by PrepStudy). */
+  /** Cited teaching overview (generated during init, read from progress). */
   overview: TopicOverview | null
   overviewLoading: boolean
   overviewError: string | null
@@ -82,6 +85,16 @@ interface TopicSessionProps {
   onSetCurrentQuestion?: (topicId: string, q: GeneratedQuestion | null) => void
   /** Ask the parent to keep this topic's question buffer filled. */
   onPrimeQuestions?: (topicId: string) => void
+  /** Current block's difficulty level (from block buffer). */
+  currentBlockDifficulty?: number | null
+  /** Nudge the next block's difficulty (+1 or -1). */
+  onNudgeDifficulty?: (delta: 1 | -1) => void
+  /** Clear the current difficulty nudge. */
+  onClearNudge?: () => void
+  /** Current difficulty nudge value for this topic. */
+  difficultyNudge?: number | null
+  /** Set an exact difficulty (post-mastery direct pick). */
+  onSetDifficulty?: (level: number) => void
 }
 
 type Mode = 'learn' | 'practice'
@@ -106,11 +119,15 @@ export function TopicSession({
   onAdvanceQuestion,
   onSetCurrentQuestion,
   onPrimeQuestions,
+  currentBlockDifficulty,
+  onNudgeDifficulty,
+  onClearNudge,
+  difficultyNudge,
+  onSetDifficulty,
 }: TopicSessionProps) {
   const [mode, setMode] = useState<Mode>('learn')
 
-  // Learn phase — the overview is generated + cached by PrepStudy and arrives
-  // via props. A local ticker just gives feedback while it's still loading.
+  // Learn phase — the overview is generated during init and arrives via props.
   const [overviewElapsed, setOverviewElapsed] = useState(0)
 
   // Practice phase — the question buffer (current + upcoming) is owned by
@@ -126,9 +143,10 @@ export function TopicSession({
   const [mcSelected, setMcSelected] = useState<number | null>(null)
   const [mcSubmitted, setMcSubmitted] = useState(false)
 
-  // Review state — index into the persisted `progress.turns` history. `null`
-  // means the live (current) question; a number shows that past answered
-  // question read-only. History survives exit/re-entry (it's in Firestore).
+  // Hint state — per question, resets on new question.
+  const [hintRevealed, setHintRevealed] = useState(false)
+
+  // Review state
   const [reviewIndex, setReviewIndex] = useState<number | null>(null)
 
   const questionReqRef = useRef(0)
@@ -139,8 +157,7 @@ export function TopicSession({
   const turns = progress?.turns ?? []
   const hasPracticed = turns.length > 0
 
-  // Tick while the overview is generating (it reads the slides + thinks) so the
-  // wait never looks frozen.
+  // Tick while the overview is generating.
   useEffect(() => {
     if (!overviewLoading) return
     setOverviewElapsed(0)
@@ -148,9 +165,7 @@ export function TopicSession({
     return () => window.clearInterval(id)
   }, [overviewLoading])
 
-  // On opening a topic: always land on the overview (concept before practice)
-  // and reset answer state. Restore a cached question if one exists so
-  // navigating away and back doesn't regenerate.
+  // On opening a topic: always land on the overview and reset answer state.
   useEffect(() => {
     questionReqRef.current++
     setMode('learn')
@@ -160,28 +175,29 @@ export function TopicSession({
     setError(null)
     setMcSelected(null)
     setMcSubmitted(false)
+    setHintRevealed(false)
     setReviewIndex(null)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [topic.id])
 
-  // Generate a question, excluding prior turns + any extra texts so each one is
-  // distinct (fixes "same question again").
+  // Generate a question (fallback for when block buffer is empty).
   const requestQuestion = useCallback(
     (exclude: string[]) => {
       const asked = [
         ...(progress?.turns ?? []).map((t) => t.questionText),
         ...exclude,
       ]
+      const effectiveDifficulty = targetDifficulty
       return generateQuestion({
         topic,
         difficulty: session.difficulty,
         examBlueprint: session.blueprint.examBlueprint,
         askedQuestions: asked,
         masteryAccumulated: accumulated,
-        targetDifficulty,
+        targetDifficulty: effectiveDifficulty,
         targetKcId,
         targetKcLabel,
-        preferMC: (targetDifficulty ?? 2) <= 1,
+        preferMC: (effectiveDifficulty ?? 1) <= 2,
       })
     },
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -190,18 +206,18 @@ export function TopicSession({
 
   // Promote a question into the displayed slot, resetting answer state.
   const promote = useCallback((q: GeneratedQuestion) => {
-    questionReqRef.current++ // supersede any in-flight on-demand fetch
+    questionReqRef.current++
     setGeneratedQ(q)
     setResult(null)
     setAnswer('')
     setError(null)
     setMcSelected(null)
     setMcSubmitted(false)
+    setHintRevealed(false)
     setLoadingQuestion(false)
   }, [])
 
-  // Fallback when the parent buffer is empty — generate one on demand and store
-  // it as the topic's current so it survives navigation.
+  // Fallback when the parent buffer is empty.
   const fetchOnDemand = useCallback(async () => {
     const token = ++questionReqRef.current
     setLoadingQuestion(true)
@@ -211,6 +227,7 @@ export function TopicSession({
     setGeneratedQ(null)
     setMcSelected(null)
     setMcSubmitted(false)
+    setHintRevealed(false)
     try {
       const q = await requestQuestion([])
       if (token !== questionReqRef.current) return
@@ -234,7 +251,7 @@ export function TopicSession({
 
   function startPractice() {
     setMode('practice')
-    onPrimeQuestions?.(topic.id) // keep the buffer topped up
+    onPrimeQuestions?.(topic.id)
     if (!generatedQ && !mastered) loadCurrent()
   }
 
@@ -243,11 +260,13 @@ export function TopicSession({
     if (!generatedQ || mcSelected == null || mcSubmitted) return
     setMcSubmitted(true)
 
-    // Use a single clamped index for both grading and the feedback message so
-    // they can never disagree (the UI highlights this same index as correct).
     const correctIndex = generatedQ.correctIndex ?? 0
     const correct = mcSelected === correctIndex
-    const score: PrepScore = correct ? 1 : 0
+    const rawScore: PrepScore = correct ? 1 : 0
+    // Apply hint penalty: if hint was used, correct = 0.5, wrong stays 0.
+    const effectiveScore = applyHintPenalty(rawScore, hintRevealed)
+    const score = (Math.round(effectiveScore * 4) / 4) as PrepScore
+
     const turn: PrepTurn = {
       questionText: generatedQ.questionText,
       userAnswer: generatedQ.choices?.[mcSelected] ?? '',
@@ -264,6 +283,9 @@ export function TopicSession({
       mcChoices: generatedQ.choices,
       mcCorrectIndex: correctIndex,
       mcSelectedIndex: mcSelected,
+      hintUsed: hintRevealed,
+      hint: generatedQ.hint,
+      hintSlide: generatedQ.hintSlide,
     }
     onRecordTurn(turn)
     setResult({
@@ -272,7 +294,6 @@ export function TopicSession({
       missingComponents: turn.missingComponents,
       correction: turn.correction,
     })
-    // Surface the topic's most relevant slide for review (especially on wrong).
     if (!correct && topic.keySlides.length > 0) {
       onSurfaceSlide(topic.keySlides[0])
     }
@@ -288,12 +309,17 @@ export function TopicSession({
         topic,
         question: generatedQ.questionText,
         answer,
+        correctAnswer: generatedQ.correctAnswer,
         history: progress?.turns,
       })
+      // Apply hint penalty to the raw score.
+      const effectiveScore = applyHintPenalty(r.score, hintRevealed)
+      const score = (Math.round(effectiveScore * 4) / 4) as PrepScore
+
       const turn: PrepTurn = {
         questionText: generatedQ.questionText,
         userAnswer: answer,
-        score: r.score,
+        score,
         correctComponents: r.correctComponents,
         missingComponents: r.missingComponents,
         correction: r.correction,
@@ -302,10 +328,13 @@ export function TopicSession({
         kcId: generatedQ.kcId,
         difficultyLevel: generatedQ.difficultyLevel,
         format: 'open',
+        hintUsed: hintRevealed,
+        hint: generatedQ.hint,
+        hintSlide: generatedQ.hintSlide,
       }
       onRecordTurn(turn)
-      setResult(r)
-      if (r.suggestedSlide && r.score < 1) onSurfaceSlide(r.suggestedSlide)
+      setResult({ ...r, score })
+      if (r.suggestedSlide && score < 1) onSurfaceSlide(r.suggestedSlide)
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Grading failed.')
     } finally {
@@ -322,17 +351,21 @@ export function TopicSession({
 
   function handleNext() {
     onRequestNext?.()
-    // Promote the next buffered question instantly; fall back to on-demand.
     const q = onAdvanceQuestion?.(topic.id) ?? null
     if (q) promote(q)
     else void fetchOnDemand()
   }
 
-  /** Step back into answered-question history (or enter it from the live view). */
+  function revealHint() {
+    setHintRevealed(true)
+    if (generatedQ?.hintSlide) {
+      onSurfaceSlide(generatedQ.hintSlide, true)
+    }
+  }
+
   function reviewPrev() {
     setReviewIndex((idx) => (idx === null ? turns.length - 1 : Math.max(0, idx - 1)))
   }
-  /** Step forward; past the most recent answered question returns to the live one. */
   function reviewNext() {
     setReviewIndex((idx) => {
       if (idx === null) return null
@@ -341,7 +374,6 @@ export function TopicSession({
     })
   }
 
-  /** Build chat context for the current state. */
   function buildChatContext(opts?: {
     question?: string
     answer?: string
@@ -512,8 +544,95 @@ export function TopicSession({
           reviewIndex={reviewIndex}
           onReviewPrev={reviewPrev}
           onReviewNext={reviewNext}
+          hintRevealed={hintRevealed}
+          onRevealHint={revealHint}
+          hintText={generatedQ?.hint ?? null}
+          hintSlide={generatedQ?.hintSlide ?? null}
+          currentBlockDifficulty={currentBlockDifficulty}
+          onNudgeDifficulty={onNudgeDifficulty}
+          onClearNudge={onClearNudge}
+          difficultyNudge={difficultyNudge}
+          targetDifficulty={targetDifficulty}
+          onSetDifficulty={onSetDifficulty}
         />
       )}
+    </div>
+  )
+}
+
+/** Difficulty nudge arrows — up/down to adjust the next block's difficulty.
+ *  Clicking the same arrow again deselects the nudge. */
+function DifficultyNudge({
+  currentLevel,
+  nudge,
+  onNudge,
+  onClearNudge,
+}: {
+  currentLevel: number
+  nudge: number | null
+  onNudge: (delta: 1 | -1) => void
+  onClearNudge: () => void
+}) {
+  function handleClick(delta: 1 | -1) {
+    if (nudge === delta) onClearNudge()
+    else onNudge(delta)
+  }
+  return (
+    <div className="prep-difficulty-adjuster">
+      <button
+        type="button"
+        className={`prep-difficulty-arrow ${nudge === -1 ? 'active' : ''}`}
+        onClick={() => handleClick(-1)}
+        disabled={currentLevel <= 1 && nudge !== -1}
+        title="Easier"
+        aria-label="Decrease difficulty"
+      >
+        ▼
+      </button>
+      <span className="prep-difficulty-level">LV {currentLevel}</span>
+      <button
+        type="button"
+        className={`prep-difficulty-arrow ${nudge === 1 ? 'active' : ''}`}
+        onClick={() => handleClick(1)}
+        disabled={currentLevel >= 5 && nudge !== 1}
+        title="Harder"
+        aria-label="Increase difficulty"
+      >
+        ▲
+      </button>
+    </div>
+  )
+}
+
+/** Post-mastery direct difficulty picker — five level buttons. */
+function MasteryDifficultyPicker({
+  currentLevel,
+  onChange,
+}: {
+  currentLevel: number
+  onChange: (level: number) => void
+}) {
+  const labels: Record<number, string> = {
+    1: 'Recall',
+    2: 'Simple',
+    3: 'Conceptual',
+    4: 'Multi-step',
+    5: 'Synthesis',
+  }
+  return (
+    <div className="prep-difficulty-adjuster">
+      <span className="prep-difficulty-level">LV</span>
+      {[1, 2, 3, 4, 5].map((level) => (
+        <button
+          key={level}
+          type="button"
+          className={`prep-difficulty-arrow ${currentLevel === level ? 'active' : ''}`}
+          onClick={() => onChange(level)}
+          title={labels[level]}
+        >
+          {level}
+        </button>
+      ))}
     </div>
   )
 }
@@ -535,19 +654,27 @@ interface PracticeViewProps {
   onSubmit: () => void
   onNext: () => void
   onReviewOverview: () => void
-  /** Opens the chat popup with Q&A context. Only present after submit. */
   onOpenChat?: () => void
-  /** Topic key slides for citation chips. */
   keySlides: KeySlide[]
-  /** Session documents for resolving display names. */
   documents: PrepSessionRecord['documents']
   onSurfaceSlide: (slide: KeySlide, force?: boolean) => void
-  /** Persisted answered-question history. */
   turns: PrepTurn[]
-  /** Index into `turns` being reviewed, or null for the live question. */
   reviewIndex: number | null
   onReviewPrev: () => void
   onReviewNext: () => void
+  // Hint
+  hintRevealed: boolean
+  onRevealHint: () => void
+  hintText: string | null
+  hintSlide: KeySlide | null
+  // Block info
+  currentBlockDifficulty?: number | null
+  onNudgeDifficulty?: (delta: 1 | -1) => void
+  onClearNudge?: () => void
+  difficultyNudge?: number | null
+  targetDifficulty?: number
+  /** Set an exact difficulty level (post-mastery direct pick). */
+  onSetDifficulty?: (level: number) => void
 }
 
 function PracticeView({
@@ -575,11 +702,23 @@ function PracticeView({
   reviewIndex,
   onReviewPrev,
   onReviewNext,
+  hintRevealed,
+  onRevealHint,
+  hintText,
+  hintSlide,
+  currentBlockDifficulty,
+  onNudgeDifficulty,
+  onClearNudge,
+  difficultyNudge,
+  targetDifficulty,
+  onSetDifficulty,
 }: PracticeViewProps) {
   const question = generatedQ?.questionText ?? null
   const isMC = generatedQ?.format === 'mc'
   const reviewing = reviewIndex !== null
   const showLive = !reviewing && (!mastered || question || loadingQuestion)
+
+  const effectiveLevel = currentBlockDifficulty ?? generatedQ?.difficultyLevel ?? targetDifficulty ?? 1
 
   return (
     <>
@@ -646,11 +785,25 @@ function PracticeView({
             <>
           <div className="prep-q-meta">
             <span className="prep-eyebrow">Question</span>
-            {generatedQ?.difficultyLevel ? (
-              <span className="prep-chip" title="Difficulty level">
-                Lv {generatedQ.difficultyLevel}
-              </span>
-            ) : null}
+            {!result && mastered && onSetDifficulty ? (
+              <MasteryDifficultyPicker
+                currentLevel={effectiveLevel}
+                onChange={onSetDifficulty}
+              />
+            ) : !result && onNudgeDifficulty && onClearNudge ? (
+              <DifficultyNudge
+                currentLevel={effectiveLevel}
+                nudge={difficultyNudge ?? null}
+                onNudge={onNudgeDifficulty}
+                onClearNudge={onClearNudge}
+              />
+            ) : (
+              effectiveLevel ? (
+                <span className="prep-chip" title="Current difficulty">
+                  Lv {effectiveLevel}
+                </span>
+              ) : null
+            )}
             <button
               type="button"
               className="prep-q-review"
@@ -669,6 +822,34 @@ function PracticeView({
           ) : (
             <div className="prep-q-loading">No question yet.</div>
           )}
+
+          {/* Hint system */}
+          {generatedQ && hintText ? (
+            <div className="prep-hint-area">
+              {!hintRevealed ? (
+                <button
+                  type="button"
+                  className="prep-hint-btn"
+                  onClick={onRevealHint}
+                >
+                  Show hint (−50% points)
+                </button>
+              ) : (
+                <div className="prep-hint-reveal">
+                  <div className="prep-hint-reveal-text">{hintText}</div>
+                  {hintSlide ? (
+                    <CitationChip
+                      slide={hintSlide}
+                      documents={documents}
+                      onSurfaceSlide={onSurfaceSlide}
+                      label="Hint slide"
+                    />
+                  ) : null}
+                  <span className="prep-hint-used-badge">Hint used — points halved</span>
+                </div>
+              )}
+            </div>
+          ) : null}
 
           {isMC && generatedQ?.choices ? (
             <MultipleChoice
@@ -723,7 +904,7 @@ function PracticeView({
             </>
           ) : (
             <div className="prep-q-loading">
-              Use “← Prev” to review your answered questions.
+              Use "← Prev" to review your answered questions.
             </div>
           )}
         </div>
@@ -754,6 +935,9 @@ function ReviewTurn({
           <span className="prep-chip" title="Difficulty level">
             Lv {turn.difficultyLevel}
           </span>
+        ) : null}
+        {turn.hintUsed ? (
+          <span className="prep-hint-used-badge">Hint used</span>
         ) : null}
         <span className="prep-q-reviewing">Answered</span>
       </div>
@@ -814,6 +998,14 @@ function ReviewTurn({
             onSurfaceSlide={onSurfaceSlide}
           />
         ) : null}
+        {turn.hintSlide ? (
+          <CitationChip
+            slide={turn.hintSlide}
+            documents={documents}
+            onSurfaceSlide={onSurfaceSlide}
+            label="Hint slide"
+          />
+        ) : null}
       </div>
     </>
   )
@@ -842,7 +1034,6 @@ function MultipleChoice({
   explanation?: string
   selected: number | null
   submitted: boolean
-  /** A new question is being fetched — block all interaction. */
   loading: boolean
   onSelect: (idx: number) => void
   onSubmit: () => void
@@ -959,7 +1150,6 @@ function Feedback({
   const scorePct = result.score * 100
   const tone =
     result.score >= 1 ? 'great' : result.score >= 0.5 ? 'ok' : 'low'
-  // Prefer the AI-suggested slide; fall back to the topic's first key slide.
   const cite = result.suggestedSlide ?? keySlides[0] ?? null
   return (
     <div className={`prep-feedback prep-feedback-${tone}`}>

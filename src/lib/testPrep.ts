@@ -714,6 +714,8 @@ export interface GenerateOverviewOptions {
   documents: PrepDocRef[]
   /** Server-side document cache ID — when set, skip loading/inlining PDFs. */
   cachedContent?: string
+  /** Summaries of previously generated overviews — used to avoid content overlap. */
+  priorOverviews?: { title: string; headings: string[] }[]
   signal?: AbortSignal
 }
 
@@ -752,6 +754,7 @@ export async function generateOverview({
   examBlueprint,
   documents,
   cachedContent,
+  priorOverviews,
   signal,
 }: GenerateOverviewOptions): Promise<TopicOverview> {
   // When a server-side cache is available, skip loading PDFs from IDB —
@@ -771,12 +774,25 @@ export async function generateOverview({
         .join('\n')
     : ''
 
+  const priorContext =
+    priorOverviews && priorOverviews.length > 0
+      ? [
+          '',
+          'The following topics have already been covered in separate overviews — do NOT repeat their content. Focus on what is unique to THIS topic.',
+          'Prior topics:',
+          ...priorOverviews.map(
+            (p) => `- ${p.title}: ${p.headings.join(', ')}`,
+          ),
+        ].join('\n')
+      : ''
+
   const instructions = [
     `Topic: ${topic.title}`,
     `Scope: ${topic.summary}`,
     `Student's target depth: ${difficulty} tier.`,
     examHint,
     docMetadata ? `\nSource documents (already provided via cache):\n${docMetadata}` : '',
+    priorContext,
     '',
     'Write the pre-practice overview, grounded in the attached slides. Return JSON:',
     '{',
@@ -883,10 +899,22 @@ export interface GeneratedQuestion {
   format: 'open' | 'mc'
   kcId?: string
   difficultyLevel: number
+  /** Directional hint text (always present on newly generated questions). */
+  hint: string
+  /** Slide reference for the hint. */
+  hintSlide?: KeySlide
+  /** Precomputed correct answer — fed to grading so the LLM only compares. */
+  correctAnswer?: string
   /** MC-only fields */
   choices?: string[]
   correctIndex?: number
   explanation?: string
+}
+
+export interface QuestionBlock {
+  questions: GeneratedQuestion[]
+  blockDifficulty: number
+  blockIndex: number
 }
 
 export async function generateQuestion({
@@ -918,7 +946,11 @@ export async function generateQuestion({
 
   const prior =
     askedQuestions.length > 0
-      ? `Do NOT repeat any of these already-asked questions:\n- ${askedQuestions.join('\n- ')}`
+      ? [
+          'These previous questions are provided as context for the next prompt:',
+          ...askedQuestions.map((q) => `- ${q}`),
+          'Do NOT repeat any of these already-asked questions; instead ask a new, fresh question that builds on the topic.',
+        ].join('\n')
       : 'This is the first question for the topic.'
 
   const kcHint = targetKcLabel
@@ -928,6 +960,10 @@ export async function generateQuestion({
   const mcHint = preferMC
     ? 'Prefer multiple-choice format for this question.'
     : 'Choose the most natural format (open-ended or multiple-choice) for this question.'
+
+  const slideOptions = topic.keySlides
+    .map((ks) => `{ "filename": "${ks.filename}", "slideIndex": ${ks.slideIndex} }`)
+    .join(', ')
 
   const user = [
     `Topic: ${topic.title}`,
@@ -943,10 +979,12 @@ export async function generateQuestion({
     '',
     'Return one of these JSON formats:',
     '',
-    'For open-ended: { "questionText": "...", "format": "open", "kcId": "<kcId or null>", "difficultyLevel": <1-5> }',
+    `For open-ended: { "questionText": "...", "format": "open", "correctAnswer": "the complete correct answer in 1-3 sentences", "kcId": "<kcId or null>", "difficultyLevel": <1-5>, "hint": "a short directional hint that points the student toward the answer without giving it away", "hintSlide": one of [${slideOptions || 'null'}] or null }`,
     '',
-    'For multiple-choice: { "questionText": "...", "format": "mc", "choices": ["A", "B", "C", "D"], "correctIndex": <0-3>, "explanation": "brief explanation of correct answer", "kcId": "<kcId or null>", "difficultyLevel": <1-5> }',
+    `For multiple-choice: { "questionText": "...", "format": "mc", "correctAnswer": "brief correct answer text", "choices": ["A", "B", "C", "D"], "correctIndex": <0-3>, "explanation": "brief explanation of correct answer", "kcId": "<kcId or null>", "difficultyLevel": <1-5>, "hint": "a short directional hint", "hintSlide": one of [${slideOptions || 'null'}] or null }`,
     'MC questions must have exactly 4 choices with 1 correct answer.',
+    'The "hint" field is REQUIRED — it should guide the student directionally without revealing the answer.',
+    'The "correctAnswer" field is REQUIRED — provide the complete, correct answer so grading can be done efficiently.',
   ].join('\n')
 
   const out = await complete({
@@ -963,6 +1001,9 @@ export async function generateQuestion({
     format?: 'open' | 'mc'
     kcId?: string
     difficultyLevel?: number
+    hint?: string
+    hintSlide?: KeySlide | null
+    correctAnswer?: string
     choices?: string[]
     correctIndex?: number
     explanation?: string
@@ -985,9 +1026,203 @@ export async function generateQuestion({
     format: isMC ? 'mc' : 'open',
     kcId: raw.kcId ?? targetKcId,
     difficultyLevel: raw.difficultyLevel ?? diffLevel,
+    hint: raw.hint || 'Review the relevant lecture slides for this concept.',
+    hintSlide: raw.hintSlide ?? undefined,
+    correctAnswer: raw.correctAnswer || undefined,
     choices: isMC ? raw.choices : undefined,
     correctIndex,
     explanation: isMC ? raw.explanation : undefined,
+  }
+}
+
+// --- Tier 2: block generation (3 questions per call) -------------------------
+
+const BLOCK_SYSTEM =
+  'You are a rigorous tutor running a mastery-based practice session. You generate ' +
+  'exactly 3 distinct questions at the specified difficulty level. You may produce ' +
+  'open-ended OR multiple-choice (MC) questions — choose whichever format best tests ' +
+  'each concept. For MC, ensure all 4 choices are distinct and plausible — never ' +
+  'repeat the same choice across questions. For technical, hardware, or inherently ' +
+  'visual subjects ask ABSTRACT, text-only conceptual or calculation questions. ' +
+  'Level 1 = Recall/definition — ask for specific terms/facts directly found in ' +
+  'lecture notes. Never reuse a practice exam question. Each question MUST include ' +
+  'a "hint" field (a short directional hint that points the student toward the ' +
+  'answer without giving it away) and a "hintSlide" (the specific slide reference). ' +
+  'Respond with a single JSON object and nothing else.'
+
+export interface GenerateQuestionBlockOptions {
+  topic: CurriculumTopic
+  difficulty: PrepDifficulty
+  examBlueprint?: ExamBlueprint
+  askedQuestions: string[]
+  masteryAccumulated: number
+  targetDifficulty?: number
+  targetKcId?: string
+  targetKcLabel?: string
+  blockIndex: number
+  signal?: AbortSignal
+}
+
+export async function generateQuestionBlock({
+  topic,
+  difficulty,
+  examBlueprint,
+  askedQuestions,
+  masteryAccumulated,
+  targetDifficulty,
+  targetKcId,
+  targetKcLabel,
+  blockIndex,
+  signal,
+}: GenerateQuestionBlockOptions): Promise<QuestionBlock> {
+  const diffLevel = targetDifficulty ?? 1
+
+  const difficultyScale = [
+    'Difficulty scale:',
+    '1 = Recall / definition — ask for specific terms/facts directly found in lecture notes',
+    '2 = Simple application',
+    '3 = Conceptual reasoning',
+    '4 = Multi-step problem',
+    '5 = Transfer / synthesis',
+  ].join('\n')
+
+  const format = examBlueprint
+    ? `Mimic this exam format where natural — question types: ${examBlueprint.questionTypes.join(', ')}; answer expectations: ${examBlueprint.answerFormatNotes}.`
+    : 'No practice exam was provided; use a mix of conceptual and applied questions.'
+
+  const prior =
+    askedQuestions.length > 0
+      ? [
+          'Previously asked questions (do NOT repeat any of these):',
+          ...askedQuestions.slice(-10).map((q) => `- ${q}`),
+        ].join('\n')
+      : 'This is the first block for the topic.'
+
+  const kcHint = targetKcLabel
+    ? `Focus questions on the sub-concept: "${targetKcLabel}" (kcId: "${targetKcId}").`
+    : ''
+
+  const slideOptions = topic.keySlides
+    .map((ks) => `{ "filename": "${ks.filename}", "slideIndex": ${ks.slideIndex} }`)
+    .join(', ')
+
+  const user = [
+    `Topic: ${topic.title}`,
+    `Summary: ${topic.summary}`,
+    `Difficulty mode: ${difficulty}.`,
+    `Target difficulty level for ALL 3 questions: ${diffLevel}.`,
+    difficultyScale,
+    `Student has accumulated ${masteryAccumulated} of ${topic.masteryThreshold} mastery points so far.`,
+    kcHint,
+    format,
+    prior,
+    '',
+    'Generate exactly 3 distinct questions as a JSON object:',
+    '{',
+    '  "questions": [',
+    '    {',
+    '      "questionText": "...",',
+    '      "format": "open" or "mc",',
+    '      "correctAnswer": "the complete correct answer in 1-3 sentences",',
+    '      "kcId": "<kcId or null>",',
+    '      "difficultyLevel": <1-5>,',
+    '      "hint": "a short directional hint",',
+    `      "hintSlide": one of [${slideOptions || 'null'}] or null,`,
+    '      "choices": ["A","B","C","D"] (MC only),',
+    '      "correctIndex": <0-3> (MC only),',
+    '      "explanation": "brief explanation" (MC only)',
+    '    }',
+    '  ]',
+    '}',
+    '',
+    'Rules:',
+    '- Exactly 3 questions. Each must be distinct.',
+    '- Every question MUST have a non-empty "hint" field.',
+    '- Every question MUST have a non-empty "correctAnswer" field with the complete correct answer.',
+    '- MC questions must have exactly 4 distinct, plausible choices.',
+    `- Prefer MC at difficulty level 1-2; choose most natural format at higher levels.`,
+  ].join('\n')
+
+  const out = await complete({
+    system: BLOCK_SYSTEM,
+    user,
+    maxTokens: 4096,
+    model: 'smart',
+    think: true,
+    json: true,
+    signal,
+    label: `question block (${topic.title}, lv${diffLevel}, #${blockIndex})`,
+  })
+
+  const raw = parseJSON<{
+    questions: Array<{
+      questionText: string
+      format?: 'open' | 'mc'
+      kcId?: string
+      difficultyLevel?: number
+      hint?: string
+      hintSlide?: KeySlide | null
+      correctAnswer?: string
+      choices?: string[]
+      correctIndex?: number
+      explanation?: string
+    }>
+  }>(out)
+
+  const questions: GeneratedQuestion[] = (raw.questions ?? [])
+    .slice(0, 3)
+    .map((q) => {
+      const isMC =
+        q.format === 'mc' && Array.isArray(q.choices) && q.choices.length >= 2
+      let correctIndex: number | undefined
+      if (isMC) {
+        const ci = Number(q.correctIndex)
+        correctIndex =
+          Number.isInteger(ci) && ci >= 0 && ci < q.choices!.length ? ci : 0
+      }
+      return {
+        questionText: q.questionText,
+        format: isMC ? ('mc' as const) : ('open' as const),
+        kcId: q.kcId ?? targetKcId,
+        difficultyLevel: q.difficultyLevel ?? diffLevel,
+        hint: q.hint || 'Review the relevant lecture slides for this concept.',
+        hintSlide: q.hintSlide ?? undefined,
+        correctAnswer: q.correctAnswer || undefined,
+        choices: isMC ? q.choices : undefined,
+        correctIndex,
+        explanation: isMC ? q.explanation : undefined,
+      }
+    })
+
+  // Pad to 3 if the model returned fewer — fall back to generating singles.
+  while (questions.length < 3) {
+    try {
+      const single = await generateQuestion({
+        topic,
+        difficulty,
+        examBlueprint,
+        askedQuestions: [
+          ...askedQuestions,
+          ...questions.map((q) => q.questionText),
+        ],
+        masteryAccumulated,
+        targetDifficulty,
+        targetKcId,
+        targetKcLabel,
+        preferMC: diffLevel <= 2,
+        signal,
+      })
+      questions.push(single)
+    } catch (e) {
+      console.warn('[prep] block padding failed', e)
+      break
+    }
+  }
+
+  return {
+    questions,
+    blockDifficulty: diffLevel,
+    blockIndex,
   }
 }
 
@@ -1008,6 +1243,8 @@ export interface GradeOptions {
   topic: CurriculumTopic
   question: string
   answer: string
+  /** Precomputed correct answer — when provided the model just compares. */
+  correctAnswer?: string
   history?: PrepTurn[]
   signal?: AbortSignal
 }
@@ -1039,16 +1276,22 @@ export async function gradeAnswer({
   topic,
   question,
   answer,
+  correctAnswer,
   signal,
 }: GradeOptions): Promise<GradeResult> {
   const slideOptions = topic.keySlides
     .map((ks) => `{ "filename": "${ks.filename}", "slideIndex": ${ks.slideIndex} }`)
     .join(', ')
 
+  const correctAnswerHint = correctAnswer
+    ? `\nCorrect answer:\n${correctAnswer}\n\nCompare the student's answer against the correct answer above.`
+    : ''
+
   const user = [
     `Topic: ${topic.title} — ${topic.summary}`,
     '',
     `Question asked:\n${question}`,
+    correctAnswerHint,
     '',
     `Student answer:\n${answer || '(blank)'}`,
     '',
@@ -1066,8 +1309,7 @@ export async function gradeAnswer({
     system: GRADE_SYSTEM,
     user,
     maxTokens: 1536,
-    model: 'smart',
-    think: true,
+    model: 'fast',
     json: true,
     signal,
   })

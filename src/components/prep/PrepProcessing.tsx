@@ -2,11 +2,20 @@ import { useEffect, useRef, useState } from 'react'
 import {
   createPrepSession,
   getPDF,
+  progressKey,
+  putTopicProgress,
   savePDF,
   type PrepSessionRecord,
+  type PrepTopicProgressRecord,
 } from '../../lib/db'
 import { loadPDFFromBytes } from '../../lib/pdf'
-import { initializeCurriculum, type PrepDocInput, type InitResult } from '../../lib/testPrep'
+import {
+  createDocumentCache,
+  generateOverview,
+  initializeCurriculum,
+  type PrepDocInput,
+  type InitResult,
+} from '../../lib/testPrep'
 import type { PrepSetupResult } from './PrepSetup'
 import { PrepHeader } from './PrepHeader'
 
@@ -162,6 +171,11 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
 
         // 4. Persist the session.
         const now = Date.now()
+        const sessionDocuments = setup.picks.map((p) => ({
+          filename: p.storageFilename,
+          role: p.role,
+          displayName: p.displayName,
+        }))
         const session: PrepSessionRecord = {
           sessionId: crypto.randomUUID(),
           title: setup.title || suggestedTitle,
@@ -170,13 +184,78 @@ export function PrepProcessing({ setup, onCancel, onDone }: PrepProcessingProps)
           difficulty: setup.difficulty,
           status: 'active',
           blueprint,
-          documents: setup.picks.map((p) => ({
-            filename: p.storageFilename,
-            role: p.role,
-            displayName: p.displayName,
-          })),
+          documents: sessionDocuments,
         }
         await createPrepSession(session)
+
+        // 5. Generate overviews for all topics in batches of 4. Each batch
+        //    passes prior overview summaries to avoid content overlap.
+        const sortedTopics = [...blueprint.topics].sort((a, b) => a.order - b.order)
+        const BATCH_SIZE = 4
+        const priorOverviews: { title: string; headings: string[] }[] = []
+
+        // Attempt to create a document cache for faster overview generation.
+        let docCache: string | null = null
+        try {
+          docCache = await createDocumentCache(sessionDocuments)
+        } catch {
+          // Non-fatal — will use inline PDFs.
+        }
+
+        for (let batchStart = 0; batchStart < sortedTopics.length; batchStart += BATCH_SIZE) {
+          if (abort.signal.aborted) return
+          const batch = sortedTopics.slice(batchStart, batchStart + BATCH_SIZE)
+
+          setStatus({
+            kind: 'running',
+            label: 'Generating overviews',
+            detail: `${batchStart + 1}–${Math.min(batchStart + BATCH_SIZE, sortedTopics.length)} of ${sortedTopics.length}: ${batch.map((t) => t.title).join(', ')}`,
+          })
+          setDone(setup.picks.length + batchStart)
+
+          const batchResults = await Promise.all(
+            batch.map(async (topic) => {
+              try {
+                return await generateOverview({
+                  topic,
+                  difficulty: setup.difficulty,
+                  examBlueprint: blueprint.examBlueprint,
+                  documents: sessionDocuments,
+                  cachedContent: docCache ?? undefined,
+                  priorOverviews: priorOverviews.length > 0 ? [...priorOverviews] : undefined,
+                  signal: abort.signal,
+                })
+              } catch (e) {
+                console.warn('overview generation failed during init', topic.title, e)
+                return null
+              }
+            }),
+          )
+
+          // Persist each overview and collect summaries for dedup.
+          for (let i = 0; i < batch.length; i++) {
+            const topic = batch[i]
+            const overview = batchResults[i]
+            if (!overview) continue
+
+            const record: PrepTopicProgressRecord = {
+              key: progressKey(session.sessionId, topic.id),
+              sessionId: session.sessionId,
+              topicId: topic.id,
+              status: 'unlocked',
+              masteryAccumulated: 0,
+              turns: [],
+              overview: JSON.stringify(overview),
+            }
+            await putTopicProgress(record)
+
+            priorOverviews.push({
+              title: topic.title,
+              headings: overview.sections.map((s) => s.heading).filter(Boolean),
+            })
+          }
+        }
+
         onDone(session)
       } catch (e) {
         if (abort.signal.aborted) return

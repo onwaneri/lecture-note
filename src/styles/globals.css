@@ -2875,14 +2875,13 @@ button:disabled {
 }
 
 .prep-chat-messages {
-  flex: 1 1 auto;
+  flex: 1 1 0;
   overflow-y: auto;
   padding: 14px 16px;
   display: flex;
   flex-direction: column;
   gap: 14px;
-  min-height: 200px;
-  max-height: 360px;
+  min-height: 0;
 }
 
 .prep-chat-empty {
@@ -3842,4 +3841,105 @@ button:disabled {
 }
 .prep-review-answer-text {
   font-size: 13.5px; color: var(--ate-ink); line-height: 1.5; white-space: pre-wrap;
+}
+
+/* ── Difficulty nudge adjuster ──────────────────────────── */
+.prep-difficulty-adjuster {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.prep-difficulty-arrow {
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid var(--ate-rule);
+  border-radius: 6px;
+  background: var(--ate-bg);
+  color: var(--ate-muted);
+  font-size: 10px;
+  cursor: pointer;
+  transition: all 0.15s ease-out;
+  padding: 0;
+}
+.prep-difficulty-arrow:hover:not(:disabled) {
+  border-color: var(--ate-accent);
+  color: var(--ate-accent);
+  background: color-mix(in srgb, var(--ate-accent) 8%, var(--ate-surface));
+}
+.prep-difficulty-arrow.active {
+  border-color: var(--ate-accent);
+  color: var(--ate-accent);
+  box-shadow: 0 0 0 1px var(--ate-accent);
+}
+.prep-difficulty-arrow:disabled {
+  opacity: 0.35;
+  cursor: not-allowed;
+}
+.prep-difficulty-level {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ate-ink);
+  font-weight: 600;
+  min-width: 36px;
+  text-align: center;
+}
+.prep-difficulty-note {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  color: var(--ate-accent);
+}
+
+/* ── Hint system ──────────────────────────────────────── */
+.prep-hint-area {
+  margin: 8px 0 12px;
+}
+.prep-hint-btn {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--ate-muted);
+  background: none;
+  border: 1px solid var(--ate-rule);
+  border-radius: 6px;
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: all 0.15s ease-out;
+}
+.prep-hint-btn:hover {
+  border-color: var(--ate-accent);
+  color: var(--ate-accent);
+}
+.prep-hint-reveal {
+  border: 1px solid var(--ate-rule);
+  border-radius: 8px;
+  padding: 12px 16px;
+  background: color-mix(in srgb, var(--ate-mark) 12%, var(--ate-surface));
+}
+.prep-hint-reveal-text {
+  font-family: var(--font-serif);
+  font-size: 14px;
+  line-height: 1.6;
+  color: var(--ate-ink);
+  margin-bottom: 8px;
+}
+.prep-hint-reveal .prep-cite {
+  margin-top: 4px;
+}
+.prep-hint-used-badge {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--ate-muted);
+  background: color-mix(in srgb, var(--ate-mark) 30%, var(--ate-surface));
+  border-radius: 4px;
+  padding: 2px 6px;
+  margin-top: 6px;
 }

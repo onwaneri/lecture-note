@@ -41,10 +41,10 @@ src/
       PrepHeader.tsx              # Shared 56px brand header for Home/Setup/Processing
       TestPrepMode.tsx            # Phase orchestrator: home | setup | processing | study; home = editorial two-column hub (hero + ruled session list w/ live mastered counts)
       PrepSetup.tsx               # 3-column setup: Gather materials | Selected + context | Intensity; name bar + footer
-      PrepProcessing.tsx          # PDF ingestion + Tier 1 init; brand-mark card + per-file status list (done/active/queued)
-      PrepStudy.tsx               # Split-pane study view; session-level interleaving + retry queue; study bar w/ progress chip; back → "← All preps"
+      PrepProcessing.tsx          # PDF ingestion + Tier 1 init + batched overview generation; brand-mark card + per-file status list (done/active/queued)
+      PrepStudy.tsx               # Split-pane study view; block-based question buffer + difficulty nudge; study bar w/ progress chip; back → "← All preps"
       CurriculumMap.tsx           # Ruled topic rows w/ KC dots + mini progress bars
-      TopicSession.tsx            # Learn/practice tabs; open-ended + MC question UI
+      TopicSession.tsx            # Learn/practice tabs; open-ended + MC question UI; hint system + difficulty nudge arrows
       PrepChatPopup.tsx           # Floating "Ask Doug" chat — viewport-sized, draggable header, edge/corner resize
       ReferencePane.tsx           # Multi-doc slide viewer + auto-surface + bidirectional per-slide notes/chat peek
   hooks/
@@ -155,7 +155,7 @@ Calls go through `aiClient` with a model **tier** (`'fast'` | `'smart'`); each p
 
 - **Tier 1 map** (per-file summaries / exam analysis): `'fast'` → `claude-haiku-4-5`, thinking off — fast, parallel extraction.
 - **Tier 1 topic picker** (single-file / synthesis): `'smart'` → `claude-sonnet-4-6` with adaptive thinking — reasoning quality matters for topic selection/sequencing.
-- **Tier 2** (overview / question generation / grading): `'smart'` with adaptive thinking.
+- **Tier 2** (overview / question generation): `'smart'` with adaptive thinking. **Grading**: `'fast'` without thinking — correct answers are precomputed during generation so the model only compares.
 
 All calls stream via the provider's streaming API (`aiClient.complete({ onText })`). Responses are strict JSON, parsed tolerantly (fence/brace stripping). Scores snap to nearest legal quarter. Hallucinated slide references dropped.
 
@@ -188,7 +188,7 @@ Legacy topics without KCs get a single fallback: `[{ id: 'kc0', label: topic.tit
 2. **Review injection** — every N turns (exam-ready: 5), pick a mastered topic weighted by least-recently-tested.
 3. **Normal selection** — weighted-random from unmastered topics, excluding last 2 asked. Weight = `1 - (accumulated / threshold)`.
 4. **KC targeting** — within chosen topic, pick KC with fewest attempts (ties: lowest score).
-5. **Adaptive difficulty** — from last 3 scores: avg > 0.85 → +1, avg < 0.5 → −1, clamped 1–5.
+5. **Adaptive difficulty** — from last 3 scores: avg > 0.85 → +1, avg < 0.5 → −1, clamped 1–5. **Default starting difficulty is 1** (recall/definition). User nudge (`difficultyNudge` on `StudyState`) is applied on top: `clamp(adaptive + nudge, 1, 5)`.
 
 **Difficulty scale** (passed to LLM): 1 = Recall/definition, 2 = Simple application, 3 = Conceptual reasoning, 4 = Multi-step problem, 5 = Transfer/synthesis.
 
@@ -200,11 +200,11 @@ Legacy topics without KCs get a single fallback: `[{ id: 'kc0', label: topic.tit
 
 Questions are either **open-ended** or **multiple-choice (MC)**, chosen by the LLM based on what's natural for the concept (biased toward MC at lower difficulty levels).
 
-**Open-ended**: student types free-form answer → graded via API (`gradeAnswer`) → quarter-point credit (0/0.25/0.5/0.75/1.0) with `correctComponents`/`missingComponents`/`correction` breakdown.
+**Open-ended**: student types free-form answer → graded via API (`gradeAnswer`) → quarter-point credit (0/0.25/0.5/0.75/1.0) with `correctComponents`/`missingComponents`/`correction` breakdown. The correct answer is **precomputed** during question generation (`correctAnswer` field on `GeneratedQuestion`) and passed to the grading call so the LLM only compares rather than reasoning from scratch — grading uses `model: 'fast'` (no thinking) for speed.
 
 **Multiple-choice**: 4 choices (A/B/C/D), 1 correct. Graded client-side (no API call) — correct → 1.0, wrong → 0.0. `generateQuestion` validates/clamps `correctIndex` to a real choice (falls back to open-ended if the choice set is malformed), so the highlighted correct answer and the client-side grade can never disagree. LLM provides an `explanation` shown after submission. The `MultipleChoice` component renders radio-style answer cards with correct/wrong highlighting on submit.
 
-Both formats carry `kcId`, `difficultyLevel`, and `format` on the `PrepTurn` record.
+Both formats carry `kcId`, `difficultyLevel`, `format`, `hintUsed`, `hint`, and `hintSlide` on the `PrepTurn` record. Every generated question includes a directional `hint` (always present) and optional `hintSlide` reference. Questions are generated in blocks of 3 (`generateQuestionBlock`) or individually (`generateQuestion` as fallback).
 
 ### UX components
 
@@ -219,10 +219,10 @@ Both formats carry `kcId`, `difficultyLevel`, and `format` on the `PrepTurn` rec
 
 - **TestPrepMode** — phase orchestrator: `home | setup | processing | study`. Home is an editorial two-column layout: left = hero + CTAs, right = ruled `prep-session-row` list with diff pills and **live per-session mastered counts** (`getAllProgressForSession`).
 - **PrepSetup** — three ruled columns under a brand header + name bar + footer: **01 Gather materials** (library list + upload), **02 Selected** (picks w/ role pill + "Anything Doug should know?" context), **03 Intensity** (Foundational/Thorough/Exam-ready radios).
-- **PrepProcessing** — ingests PDFs, runs Tier 1 init; centered brand-mark card with Newsreader heading, elapsed chip, and a per-file status list (done/active/queued, driven by a `done` count).
-- **PrepStudy** — split-pane: left = curriculum map or topic session, right = resizable/collapsible reference pane. Manages session-level state: retry queue, recent topic IDs, turn count (in-memory refs, not persisted). Calls `selectNextQuestion()` and `onAnswerGraded()` to drive adaptive behavior. Shows topic-switch banner when interleaving causes a topic change. **Owns overview generation**: a background prefetch (`ensureOverview`) generates+persists each topic's cited overview once progress loads — sequentially, with the just-opened topic jumped to the front — so overviews are ready before entry and saved immediately (survives navigating away mid-generation). `TopicSession` consumes them via `overview`/`overviewLoading`/`overviewError`/`onRetryOverview` props. **Owns the question buffer**: a per-topic queue (`ensureBuffer`, target 3) is pre-generated **concurrently** when a topic opens and refilled as questions are consumed or answered. It lives here (not in `TopicSession`) so prefetching keeps running across tab/topic navigation; `TopicSession` consumes it via `cachedQuestion` (the persisted current) + `onTakeQuestion`/`onAdvanceQuestion`, with an on-demand fetch (`onSetCurrentQuestion`) as the buffer-empty fallback. The buffer is **persisted** to the topic's `prepProgress` record (`pendingQuestions`, index 0 = current displayed) via `syncPending` and restored on load, so **unanswered** questions survive a full prep exit / reload.
+- **PrepProcessing** — ingests PDFs, runs Tier 1 init, then **generates overviews in batches of 4** (parallel within batch, sequential across batches) with `priorOverviews` context dedup. Each batch's overviews are persisted as `PrepTopicProgressRecord` entries so they're ready before the student opens any topic. Centered brand-mark card with Newsreader heading, elapsed chip, and a per-file status list (done/active/queued).
+- **PrepStudy** — split-pane: left = curriculum map or topic session, right = resizable/collapsible reference pane. Manages session-level state: retry queue, turn count (in-memory refs, not persisted). Calls `selectNextQuestion()` and `onAnswerGraded()` to drive adaptive behavior. **Overviews are pre-generated during init** (PrepProcessing); PrepStudy only provides error-recovery re-generation via `retryOverview`. `TopicSession` consumes them via `overview`/`overviewLoading`/`overviewError`/`onRetryOverview` props. **Owns the block buffer**: a per-topic `BlockSlot` holds `currentBlock` (3 questions at the same difficulty) + `nextBlock` (pre-generated after Q2). `takeQuestion` returns the current block's question at `currentIndex`; `advanceQuestion` increments the index or promotes the next block. The buffer is **persisted** via `pendingQuestionBlock` in the topic's `prepProgress` record and restored on load. Supports **difficulty nudge**: user-triggered ±1 discards the current block and regenerates at the nudged level (consumed after block finishes). Old `pendingQuestions` format is discarded on load (backward compat).
 - **CurriculumMap** — ruled topic rows (number, name + summary, KC dots, mini progress bar + `✓ Mastered`/`Not started`/`pts/threshold`); head shows the session title (passed via `title` prop) + mastered chip. Mastered rows go green.
-- **TopicSession** — two tabs: **Overview** (teaching primer with cited sections + citation chips that surface slides in the reference pane; generated/cached by PrepStudy and received via props — pure consumer) and **Practice** (one question at a time). Accepts `targetDifficulty`, `targetKcId`, `targetKcLabel` from the session-level selector. Renders either a textarea (open-ended) or `MultipleChoice` component based on question format. **Question source**: the displayed question comes from PrepStudy's per-topic buffer — "Next" promotes the next buffered one instantly; generation excludes prior + buffered question text so each is distinct, with an on-demand fetch only when the buffer is empty. Provides chat trigger buttons: "Ask about this topic" on the overview tab (when overview is loaded), "Ask about this" on the practice tab (after answer submission only). **Question-history navigator**: a Prev/Next pager (with a "Reviewing N / M" / "Current question" position) lets the student page back through previously answered questions, each re-rendered read-only (`ReviewTurn`) from the persisted `progress.turns` — MC choices show the picked + correct answer, open answers show the typed text, plus the full graded feedback and citation. History is in Firestore, so it survives exiting and reopening prep; "Back to current →" returns to the live question.
+- **TopicSession** — two tabs: **Overview** (teaching primer with cited sections + citation chips that surface slides in the reference pane; pre-generated during init and received via props — pure consumer) and **Practice** (one question at a time). Accepts `targetDifficulty`, `targetKcId`, `targetKcLabel` from the session-level selector. Renders either a textarea (open-ended) or `MultipleChoice` component based on question format. **Question source**: the displayed question comes from PrepStudy's per-topic block buffer — "Next" promotes the next question in the block instantly; between blocks a brief loading state shows if the next block isn't ready. **Hint system**: every question has a "Show hint" button; revealing the hint surfaces the `hintSlide` in the reference pane and halves the score for that question. `hintUsed`, `hint`, and `hintSlide` are persisted on the `PrepTurn`. **Difficulty nudge**: `DifficultyNudge` component (up/down arrows + "LV N" chip) replaces the old `DifficultySelector`; nudging discards the current block and regenerates at the adjusted level. Clicking the same arrow deselects; active arrow shows blue accent outline. **Post-mastery picker**: `MasteryDifficultyPicker` (5 level buttons) replaces the nudge arrows once the topic is mastered; picking a level generates a single question at that exact difficulty (not a block). Block internals (1/3 position) are not surfaced in the UI. Provides chat trigger buttons: "Ask about this topic" on the overview tab, "Ask about this" on the practice tab (after submission only). **Question-history navigator**: a Prev/Next pager lets the student page back through previously answered questions (`ReviewTurn`); hint slide + grading slide both shown as clickable `CitationChip`s, with a "Hint used" badge when applicable.
 - **PrepChatPopup ("Ask Doug")** — floating chat window. **Default size scales to the viewport** (~30% w / ~72% h, clamped), **draggable by its header**, and **resizable** from the right edge (width), bottom edge (height), or corner (both); geometry persists across close/reopen (in-component state, re-clamped on viewport resize). Session-scoped history persists across all topics/questions. Streams from the configured AI provider (`model: 'smart'`). Context includes current topic, overview, and (after submission) the question, answer, score, and feedback. Opened via TopicSession trigger buttons.
 - **ReferencePane** — vertical scroll carousel of source slides (lazily rasterised via IntersectionObserver with 600px preload margin). `<select>` switches sources. Resizable (drag divider), collapsible. Nudge banner on AI-suggested slides; smooth-scroll + brief highlight. **Bidirectional notes peek:** every slide shows a ✎ badge (solid when it has lecture-mode notes/chat, faded "+" to add); a bottom-sheet renders the slide's note markdown + Ask-Doug chat history and lets you **edit/add notes that autosave back to the lecture note store** (`setNote`, same `filename::slideIndex` key). Surfacing a slide (Tier-3 / citation) auto-opens the sheet only if that slide has content. Notes loaded per active document via `getAllNotesForFile`/`getAllChatsForFile`; empty for prep-only uploads.
 
@@ -242,17 +242,43 @@ KnowledgeComponent    = { id, label }
 CurriculumTopic       = { id, title, summary, keySlides, masteryThreshold, order, knowledgeComponents }
 PrepTurn              = { questionText, userAnswer, score, correctComponents, missingComponents,
                           correction, suggestedSlide?, timestamp, kcId?, difficultyLevel?,
-                          format?, mcChoices?, mcCorrectIndex?, mcSelectedIndex? }
+                          format?, mcChoices?, mcCorrectIndex?, mcSelectedIndex?,
+                          hintUsed?, hint?, hintSlide? }
 KCMasteryRecord       = { attempts, totalScore }
+QuestionBlock         = { questions: GeneratedQuestion[], blockDifficulty, blockIndex }
 PrepTopicProgressRecord = { key, sessionId, topicId, status, masteryAccumulated, turns,
-                            overview?, kcMastery?, pendingQuestions? }
+                            overview?, kcMastery?, pendingQuestionBlock? }
 RetryItem             = { topicId, kcId?, questionsUntilRetry }
 MasteryConfig         = { pointThreshold, minKCAttempts, minKCAvgScore, minDifficultyReached,
                           interleaving, retryEnabled, retryDelay, reviewInterval }
 ```
+
+### Mastery scoring
+
+Only questions at difficulty level 2 or higher count positively toward mastery. Score multipliers:
+- **Level 1**: 0 (doesn't count toward mastery)
+- **Level 2**: 0.5x points
+- **Level 3**: 0.75x points
+- **Level 4+**: 1x points (full credit)
+
+**Wrong-answer penalties** (score = 0): L1=-0.5, L2=-0.4, L3=-0.3, L4=-0.2, L5=-0.1. Total mastery is clamped to ≥ 0.
+
+**Hint penalty**: using a hint halves the raw score before mastery calculation (`applyHintPenalty` in `questionSelector.ts`).
+
+### Block-based question generation
+
+Questions are generated in blocks of 3 at the same difficulty level (`generateQuestionBlock` in `testPrep.ts`). Each question includes a `hint` (directional text) and optional `hintSlide` (slide reference). The block buffer in `PrepStudy` manages current + next blocks so "Next question" is instant within a block, with next-block prefetch starting after Q2.
+
+**Difficulty nudge**: users can press up/down arrows to adjust the next block's difficulty by ±1 on top of the adaptive level. Clicking the same arrow again deselects the nudge; selected arrows show a blue accent outline. The nudge discards the current block and regenerates. Nudge is consumed (cleared) after the block finishes. **Post-mastery**: once a topic is mastered, the nudge arrows are replaced by a direct 5-level picker (buttons 1–5) and questions are generated individually (not in blocks) at the chosen level. Post-mastery answers are recorded in history but **do not change mastery points** — the accumulated score is frozen at the mastered threshold.
+
+**Overview pre-generation**: overviews are generated during `PrepProcessing` (init screen) in batches of 4, with `priorOverviews` context dedup so later topics don't repeat earlier content. `PrepStudy` only does error-recovery re-generation.
 
 ### Backward compatibility
 
 - Difficulty values `light|medium|hard` mapped on read via `normalizeDifficulty()`.
 - Topics without `knowledgeComponents` get fallback KC via `ensureKCs()`.
 - Turns without `kcId`/`difficultyLevel`/`format` treated as `kcId: 'kc0'`, `difficultyLevel: 2`, `format: 'open'`.
+- Turns without `hintUsed` read as `hintUsed: false`.
+- Old `pendingQuestions` (array format) on `PrepTopicProgressRecord` is discarded on load — fresh blocks are generated instead. The field is kept on the type for read compat but never written.
+- Old `GeneratedQuestion` objects without `hint` get a default hint string.
+
